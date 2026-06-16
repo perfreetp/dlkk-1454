@@ -118,7 +118,7 @@ function parseSizeToBytes(str: string): number {
 
 export default function TaskConfig() {
   const navigate = useNavigate();
-  const { dataSources, targetLocations, createMigrationTask, addDataSource, addTargetLocation } = useAppStore();
+  const { dataSources, targetLocations, createMigrationTask, addDataSource, addTargetLocation, currentOperator } = useAppStore();
 
   const [currentStep, setCurrentStep] = useState(0);
   const [selectedSourceIds, setSelectedSourceIds] = useState<string[]>([]);
@@ -236,11 +236,13 @@ export default function TaskConfig() {
     createMigrationTask({
       name,
       sourceId: selectedSourceIds[0],
+      sourceIds: selectedSourceIds,
+      sourceNames: selectedSources.map(d => d.name),
       targetId: selectedTargetId!,
       priority,
       totalFiles,
       totalSize: totalSizeStr,
-      type: 'migration',
+      totalSizeBytes,
     });
 
     navigate('/execution');

@@ -170,13 +170,17 @@ export default function BackupStrategy() {
   const openEditModal = (schedule: BackupSchedule) => {
     setEditingSchedule(schedule);
     setScheduleName(schedule.name);
-    setFrequency(schedule.frequency === 'monthly' ? 'weekly' : (schedule.frequency as 'daily' | 'weekly'));
-    setScheduleTime(schedule.scheduleTime.split(' ').pop() || schedule.scheduleTime);
-    setWeekdays(schedule.dayOfWeek !== undefined ? [schedule.dayOfWeek] : [1, 3, 5]);
+    const scheduleType = ((schedule.type || schedule.frequency) as string) === 'monthly' ? 'weekly' : ((schedule.type || schedule.frequency) as 'daily' | 'weekly');
+    setFrequency(scheduleType);
+    setBackupType((schedule.backupType as 'full' | 'incremental') || 'incremental');
+    setScheduleTime(schedule.timeOfDay || schedule.scheduleTime.split(' ').pop() || schedule.scheduleTime);
+    setWeekdays(schedule.daysOfWeek && schedule.daysOfWeek.length > 0
+      ? schedule.daysOfWeek
+      : schedule.dayOfWeek !== undefined ? [schedule.dayOfWeek] : [1, 3, 5]);
     setSelectedSourceIds([schedule.sourceId]);
     setSelectedTargetId(schedule.targetId);
-    setRetentionCount(schedule.retentionDays);
-    setScheduleEnabled(schedule.status === 'active');
+    setRetentionCount(schedule.retentionCount ?? schedule.retentionDays);
+    setScheduleEnabled(schedule.enabled ?? (schedule.status === 'active'));
     setShowScheduleModal(true);
   };
 
@@ -201,33 +205,37 @@ export default function BackupStrategy() {
   const handleSaveSchedule = () => {
     if (!scheduleName.trim() || selectedSourceIds.length === 0 || !selectedTargetId) return;
 
+    const daysOfWeek = frequency === 'weekly' ? weekdays : [];
     const dayOfWeek = frequency === 'weekly' && weekdays.length > 0 ? weekdays[0] : undefined;
-    const finalScheduleTime = frequency === 'weekly' && dayOfWeek !== undefined
-      ? `周${WEEKDAY_LABELS[dayOfWeek]} ${scheduleTime}`
-      : scheduleTime;
 
     createBackupSchedule({
       name: scheduleName.trim(),
+      enabled: scheduleEnabled,
+      type: frequency,
+      frequency,
+      backupType,
+      timeOfDay: scheduleTime,
+      scheduleTime,
+      daysOfWeek,
+      dayOfWeek,
+      retentionCount,
+      retentionDays: retentionCount,
       sourceId: selectedSourceIds[0],
       targetId: selectedTargetId,
-      frequency: frequency,
-      scheduleTime: finalScheduleTime,
-      dayOfWeek,
-      retentionDays: retentionCount,
-      enabled: scheduleEnabled,
-    });
+    } as Parameters<typeof createBackupSchedule>[0]);
 
     setShowScheduleModal(false);
   };
 
   const handleViewFiles = (versionId: string) => {
     selectVersion(versionId);
-    navigate('/recovery');
+    navigate('/recovery', { state: { defaultTab: 'compare' } });
   };
 
   const handleRestore = (versionId: string) => {
+    const version = backupVersions.find(v => v.id === versionId);
     selectVersion(versionId);
-    navigate('/recovery');
+    navigate('/recovery', { state: { defaultTab: 'recovery' } });
   };
 
   const filteredVersions = useMemo(() => {
@@ -303,15 +311,15 @@ export default function BackupStrategy() {
           </div>
           <div className="flex items-center gap-2 pt-2 border-t border-slate-100">
             <button
-              onClick={() => handleViewFiles(v.id)}
+              onClick={(e) => { e.stopPropagation(); handleViewFiles(v.id); }}
               className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-slate-700 bg-white border border-slate-300 rounded-lg hover:bg-slate-50 transition-colors"
             >
               <FolderOpen className="h-3.5 w-3.5" />
               查看文件
             </button>
             <button
-              onClick={() => handleRestore(v.id)}
-              className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-white bg-primary-500 rounded-lg hover:bg-primary-600 transition-colors"
+              onClick={(e) => { e.stopPropagation(); handleRestore(v.id); }}
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-primary-600 bg-primary-50 rounded-lg hover:bg-primary-100 transition-colors border border-primary-200"
             >
               <RotateCcw className="h-3.5 w-3.5" />
               恢复此版本
@@ -486,12 +494,26 @@ export default function BackupStrategy() {
                           className="flex items-center justify-between gap-2 cursor-pointer"
                           onClick={() => setExpandedVersionId(expandedVersionId === item.id ? null : item.id)}
                         >
-                          <div className="flex items-center gap-2">{item.title as React.ReactNode}</div>
-                          {expandedVersionId === item.id ? (
-                            <ChevronUp className="h-4 w-4 text-slate-400 shrink-0" />
-                          ) : (
-                            <ChevronDown className="h-4 w-4 text-slate-400 shrink-0" />
-                          )}
+                          <div className="flex items-center gap-2 min-w-0">{item.title as React.ReactNode}</div>
+                          <div className="flex items-center gap-1 shrink-0">
+                            <button
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                const version = backupVersions.find(v => v.id === item.id);
+                                if (version) handleRestore(version.id);
+                              }}
+                              className="inline-flex items-center gap-1 px-2 py-1 text-xs font-medium text-primary-600 bg-primary-50 rounded-md hover:bg-primary-100 transition-colors"
+                              title="恢复此版本"
+                            >
+                              <RotateCcw className="h-3.5 w-3.5" />
+                              <span className="hidden sm:inline">恢复</span>
+                            </button>
+                            {expandedVersionId === item.id ? (
+                              <ChevronUp className="h-4 w-4 text-slate-400 shrink-0" />
+                            ) : (
+                              <ChevronDown className="h-4 w-4 text-slate-400 shrink-0" />
+                            )}
+                          </div>
                         </div>
                       ),
                     }))} />
@@ -1088,9 +1110,14 @@ function ScheduleCard({
   const SourceIcon = source ? (DATA_SOURCE_TYPE_ICON[source.type] || Database) : Database;
   const TargetIcon = target ? (TARGET_TYPE_ICON[target.type] || HardDrive) : HardDrive;
 
-  const displayTime = schedule.scheduleTime.includes(' ')
+  const scheduleType = schedule.type || schedule.frequency;
+  const displayTime = schedule.timeOfDay || (schedule.scheduleTime.includes(' ')
     ? schedule.scheduleTime.split(' ')[1]
-    : schedule.scheduleTime;
+    : schedule.scheduleTime);
+  const nextRunAt = (schedule as any).nextRunAt || schedule.nextRun;
+  const retentionDisplay = schedule.retentionCount ?? schedule.retentionDays;
+  const daysOfWeekList = schedule.daysOfWeek ?? (schedule.dayOfWeek !== undefined ? [schedule.dayOfWeek] : []);
+  const isEnabled = schedule.enabled ?? (schedule.status === 'active');
 
   return (
     <div className="bg-white rounded-xl shadow-sm border border-slate-200 p-5 hover:shadow-md transition-shadow">
@@ -1099,7 +1126,7 @@ function ScheduleCard({
         <label className="relative inline-flex items-center cursor-pointer shrink-0">
           <input
             type="checkbox"
-            checked={schedule.status === 'active'}
+            checked={isEnabled}
             onChange={onToggle}
             className="sr-only peer"
           />
@@ -1110,20 +1137,28 @@ function ScheduleCard({
       <div className="flex flex-wrap items-center gap-2 mb-3">
         <span className={cn(
           'inline-flex items-center px-2 py-0.5 rounded-md text-xs font-medium',
-          schedule.frequency === 'daily'
+          scheduleType === 'daily'
             ? 'bg-sky-100 text-sky-700'
-            : schedule.frequency === 'weekly'
+            : scheduleType === 'weekly'
             ? 'bg-purple-100 text-purple-700'
             : 'bg-slate-100 text-slate-700'
         )}>
-          {FREQUENCY_LABEL[schedule.frequency] || schedule.frequency}
+          {FREQUENCY_LABEL[scheduleType] || scheduleType}
         </span>
+        {scheduleType === 'weekly' && daysOfWeekList.map((day, idx) => (
+          <span key={idx} className="inline-flex items-center px-2 py-0.5 rounded-md text-xs font-medium bg-amber-100 text-amber-700">
+            周{WEEKDAY_LABELS[day]}
+          </span>
+        ))}
         <span className="inline-flex items-center px-2 py-0.5 rounded-md text-xs font-medium bg-primary-100 text-primary-700">
-          {schedule.retentionDays}天保留
+          {retentionDisplay} 个版本保留
         </span>
-        {schedule.frequency === 'weekly' && schedule.dayOfWeek !== undefined && (
-          <span className="inline-flex items-center px-2 py-0.5 rounded-md text-xs font-medium bg-amber-100 text-amber-700">
-            周{WEEKDAY_LABELS[schedule.dayOfWeek]}
+        {schedule.backupType && (
+          <span className={cn(
+            'inline-flex items-center px-2 py-0.5 rounded-md text-xs font-medium',
+            schedule.backupType === 'full' ? 'bg-primary-100 text-primary-700' : 'bg-emerald-100 text-emerald-700'
+          )}>
+            {BACKUP_TYPE_LABEL[schedule.backupType] || schedule.backupType}
           </span>
         )}
       </div>
@@ -1133,7 +1168,7 @@ function ScheduleCard({
         <span className="font-mono font-medium">{displayTime}</span>
         <span className="text-slate-300">·</span>
         <span className="text-xs text-slate-500">
-          下次执行：{formatDateTime(schedule.nextRun)}
+          下次执行：{formatDateTime(nextRunAt)}
         </span>
       </div>
 

@@ -1,4 +1,5 @@
-import { useState, useMemo } from 'react';
+import { useState, useMemo, useEffect } from 'react';
+import { useLocation } from 'react-router-dom';
 import {
   GitCompare,
   RotateCcw,
@@ -220,9 +221,17 @@ function formatFileSize(size?: number): string {
 }
 
 export default function RecoveryVerification() {
-  const [activeTab, setActiveTab] = useState<TabKey>('compare');
+  const location = useLocation();
+  const locationState = location.state as { defaultTab?: TabKey } | null;
+  const [activeTab, setActiveTab] = useState<TabKey>(locationState?.defaultTab || 'compare');
 
   const store = useAppStore();
+
+  useEffect(() => {
+    if (locationState?.defaultTab) {
+      setActiveTab(locationState.defaultTab);
+    }
+  }, [locationState?.defaultTab]);
 
   return (
     <div className="min-h-screen bg-slate-50">
@@ -775,7 +784,9 @@ function RecoveryTab() {
   const versions = store.backupVersions;
   const locations = targetLocations;
 
-  const [selectedVersionId, setSelectedVersionId] = useState<string | null>(versions[0]?.id ?? null);
+  const [selectedVersionId, setSelectedVersionId] = useState<string | null>(
+    store.selectedVersionId ?? versions[0]?.id ?? null
+  );
   const [recoveryMode, setRecoveryMode] = useState<RecoveryMode>('full');
   const [pathStrategy, setPathStrategy] = useState<PathStrategy>('original');
   const [conflictStrategy, setConflictStrategy] = useState<ConflictStrategy>('skip');
@@ -785,6 +796,17 @@ function RecoveryTab() {
   const [selectedFileIds, setSelectedFileIds] = useState<Set<string>>(new Set());
   const [showConfirmModal, setShowConfirmModal] = useState(false);
   const [showSuccess, setShowSuccess] = useState(false);
+  const [lastTaskId, setLastTaskId] = useState<string>('');
+
+  const handleVersionSelect = (versionId: string | null) => {
+    setSelectedVersionId(versionId);
+    store.selectVersion(versionId);
+  };
+
+  const handleRecoveryModeChange = (mode: RecoveryMode) => {
+    setRecoveryMode(mode);
+    setSelectedFileIds(new Set());
+  };
 
   const selectedVersion = versions.find((v) => v.id === selectedVersionId) || null;
   const selectedLocation = locations.find((l) => l.id === targetLocationId) || null;
@@ -947,18 +969,22 @@ function RecoveryTab() {
       finalPath = `${selectedLocation.path}/recovery_${selectedVersion.version}_${timestamp}`;
     }
 
-    store.performRecovery({
-      name: `恢复-${selectedVersion.version}-${Date.now()}`,
+    const pathLabel = pathStrategy === 'original' ? '原路径' : finalPath;
+    const taskName = `恢复 ${selectedVersion.version} 至 ${pathLabel}`;
+
+    const taskId = store.performRecoveryAndVerify({
+      name: taskName,
       versionId: selectedVersion.id,
       targetId: selectedLocation.id,
       targetPath: finalPath,
-      fileIds: effectiveFileIds.length > 0 ? effectiveFileIds : undefined,
       priority: 'normal',
       totalFiles: effectiveFileCount,
-      totalSize: '0 B',
+      fileIds: recoveryMode === 'full' ? [] : effectiveFileIds,
       overwriteExisting: conflictStrategy === 'overwrite',
+      totalSize: formatFileSize(effectiveTotalSize),
     });
 
+    setLastTaskId(taskId);
     setShowConfirmModal(false);
     setShowSuccess(true);
     setTimeout(() => setShowSuccess(false), 3000);
@@ -976,11 +1002,12 @@ function RecoveryTab() {
         title: v.version,
         description: `${BACKUP_TYPE_LABEL[type] || type} · ${(v as unknown as { filesCount: number }).filesCount} 文件 · ${(v as unknown as { size: string }).size}`,
         color: isSelected ? 'primary' : type === 'full' ? 'success' : 'info',
+        active: isSelected,
         content: isSelected ? (
           <button
             onClick={(e) => {
               e.stopPropagation();
-              setSelectedVersionId(null);
+              handleVersionSelect(null);
             }}
             className="text-xs font-medium text-primary-600 hover:text-primary-700"
           >
@@ -999,7 +1026,7 @@ function RecoveryTab() {
           </div>
           <div>
             <div className="font-semibold text-emerald-800 text-sm">恢复任务创建成功</div>
-            <div className="text-xs text-emerald-600">任务已加入队列，将在后台执行</div>
+            <div className="text-xs text-emerald-600">任务 ID：{lastTaskId}，已自动生成校验报告</div>
           </div>
         </div>
       )}
@@ -1024,7 +1051,7 @@ function RecoveryTab() {
               onClick={(e) => {
                 const li = (e.target as HTMLElement).closest('[data-version-id]') as HTMLElement | null;
                 if (li) {
-                  setSelectedVersionId(li.dataset.versionId || null);
+                  handleVersionSelect(li.dataset.versionId || null);
                 }
               }}
             >
@@ -1039,14 +1066,14 @@ function RecoveryTab() {
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
               <RadioCard
                 checked={recoveryMode === 'full'}
-                onChange={() => setRecoveryMode('full')}
+                onChange={() => handleRecoveryModeChange('full')}
                 title="整版本恢复"
                 description="恢复该备份版本中的所有文件"
                 icon={RotateCcw}
               />
               <RadioCard
                 checked={recoveryMode === 'custom'}
-                onChange={() => setRecoveryMode('custom')}
+                onChange={() => handleRecoveryModeChange('custom')}
                 title="自定义恢复"
                 description="手动勾选需要恢复的文件"
                 icon={CheckSquare}
@@ -1057,7 +1084,14 @@ function RecoveryTab() {
           {recoveryMode === 'custom' && (
             <div className="bg-white rounded-xl border border-slate-200 overflow-hidden">
               <div className="px-5 py-4 border-b border-slate-100 flex flex-wrap items-center justify-between gap-3">
-                <h3 className="text-sm font-bold text-slate-800">选择文件</h3>
+                <h3 className="text-sm font-bold text-slate-800">
+                  选择文件
+                  {selectedVersion && (
+                    <span className="ml-2 text-xs font-normal text-slate-500">
+                      （版本：{selectedVersion.version}）
+                    </span>
+                  )}
+                </h3>
                 <div className="flex items-center gap-2">
                   <span className="text-xs text-slate-500">
                     已选中 <strong className="text-slate-700">{selectedCount}</strong> 项
@@ -1488,6 +1522,14 @@ function VerificationTab() {
                     <div className="flex-1 min-w-0">
                       <div className="flex flex-wrap items-center gap-3 mb-2">
                         <h3 className="font-bold text-slate-900 truncate">{result.name}</h3>
+                        <span className={cn(
+                          'inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[10px] font-semibold border',
+                          result.type === 'recovery'
+                            ? 'bg-rose-50 text-rose-700 border-rose-200'
+                            : 'bg-sky-50 text-sky-700 border-sky-200'
+                        )}>
+                          {result.type === 'recovery' ? '恢复校验' : '迁移校验'}
+                        </span>
                         <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[10px] font-semibold bg-slate-100 text-slate-600 border border-slate-200">
                           <Hash className="h-3 w-3" />
                           {algorithm}

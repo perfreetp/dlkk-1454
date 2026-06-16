@@ -19,7 +19,9 @@ import {
   type BackupVersion,
   type AuditLog,
   type Notification,
-  type VerificationResult
+  type VerificationResult,
+  type ScheduleType,
+  type BackupType
 } from '../data/mockData';
 
 export interface RecoveryTask {
@@ -82,6 +84,8 @@ interface AppStore {
   selectedVersionId: string | null;
   compareVersionIds: string[];
   unreadCount: number;
+  skippedFileIds: string[];
+  newestCreatedTaskId: string | null;
 
   addDataSource: (data: Omit<DataSource, 'id' | 'createdAt' | 'lastSync' | 'totalFiles' | 'totalSize' | 'status'>) => void;
   updateDataSource: (id: string, updates: Partial<DataSource>) => void;
@@ -91,20 +95,27 @@ interface AppStore {
   updateTargetLocation: (id: string, updates: Partial<TargetLocation>) => void;
   deleteTargetLocation: (id: string) => void;
 
-  createMigrationTask: (data: Omit<MigrationTask, 'id' | 'status' | 'progress' | 'completedFiles' | 'failedFiles' | 'transferredSize' | 'createdAt' | 'createdBy' | 'operatorId'>) => void;
+  createMigrationTask: (data: Partial<Omit<MigrationTask, 'id' | 'status' | 'progress' | 'completedFiles' | 'failedFiles' | 'transferredSize' | 'createdAt' | 'createdBy' | 'operatorId'>> & { name: string; targetId: string; priority: MigrationTask['priority']; sourceId?: string; sourceIds?: string[]; totalFilesNum?: number; totalSizeBytes?: number; sourceNames?: string[] }) => void;
+  selectTask: (taskId: string | null) => void;
+  initSelectedTaskFromNewest: () => void;
   updateTaskStatus: (taskId: string, updates: TaskStatusUpdate) => void;
+  setSelectedTaskId: (taskId: string | null) => void;
 
   retryFailedFile: (fileId: string) => void;
   retryAllFailedFiles: (taskId: string) => void;
+  batchRetryFailedFiles: (taskId: string, fileIds: string[]) => void;
+  skipFailedFile: (fileId: string) => void;
+  batchSkipFiles: (fileIds: string[]) => void;
 
   toggleBackupSchedule: (scheduleId: string) => void;
-  createBackupSchedule: (data: Partial<BackupSchedule> & { name: string }) => void;
+  createBackupSchedule: (data: Partial<BackupSchedule> & { name: string; enabled?: boolean }) => void;
 
   selectVersion: (versionId: string | null) => void;
   setCompareVersions: (versionIds: string[]) => void;
 
   performRecovery: (data: Omit<RecoveryTask, 'id' | 'status' | 'progress' | 'processedFiles' | 'processedSize' | 'createdAt' | 'createdBy'>) => void;
-  generateVerification: (data: { taskId: string; name: string; totalFiles: number }) => void;
+  performRecoveryAndVerify: (data: Omit<RecoveryTask, 'id' | 'status' | 'progress' | 'processedFiles' | 'processedSize' | 'createdAt' | 'createdBy'>) => string;
+  generateVerification: (data: { taskId: string; name: string; totalFiles: number; type?: 'migration' | 'recovery' }) => void;
 
   markAsRead: (id: string) => void;
   markAllAsRead: () => void;
@@ -135,6 +146,8 @@ export const useAppStore = create<AppStore>((set, get) => ({
   selectedVersionId: null,
   compareVersionIds: [],
   unreadCount: initialNotifications.filter((n) => !n.read).length,
+  skippedFileIds: [],
+  newestCreatedTaskId: null,
 
   addDataSource: (data) => {
     const newDs: DataSource = {
@@ -239,8 +252,22 @@ export const useAppStore = create<AppStore>((set, get) => ({
 
   createMigrationTask: (data) => {
     const operator = get().currentOperator;
-    const newTask: MigrationTask = {
+    const dataSourcesList = get().dataSources;
+    const sourceIds = data.sourceIds ?? (data.sourceId ? [data.sourceId] : []);
+    const sourceNames = sourceIds
+      .map((id) => dataSourcesList.find((ds) => ds.id === id)?.name)
+      .filter((name): name is string => !!name);
+    const totalSizeBytes = data.totalSizeBytes ?? 0;
+
+    const newTask = {
+      type: 'migration',
+      filterRuleIds: [],
       ...data,
+      totalFiles: data.totalFiles ?? data.totalFilesNum ?? 0,
+      sourceIds,
+      sourceNames,
+      totalSizeBytes,
+      sourceId: sourceIds[0] ?? data.sourceId ?? '',
       id: generateId('mt'),
       status: 'pending',
       progress: 0,
@@ -248,9 +275,14 @@ export const useAppStore = create<AppStore>((set, get) => ({
       failedFiles: 0,
       transferredSize: '0 B',
       createdAt: getNow(),
-      createdBy: operator.name
-    };
-    set((s) => ({ migrationTasks: [...s.migrationTasks, newTask] }));
+      createdBy: operator.name,
+      operatorId: operator.id
+    } as MigrationTask;
+    set((s) => ({
+      migrationTasks: [...s.migrationTasks, newTask],
+      selectedTaskId: newTask.id,
+      newestCreatedTaskId: newTask.id
+    }));
     get().addAuditLog({
       action: '创建迁移任务',
       actionType: 'create',
@@ -259,6 +291,21 @@ export const useAppStore = create<AppStore>((set, get) => ({
       targetType: 'migration_task',
       details: `创建任务：${newTask.name}`
     });
+  },
+
+  selectTask: (taskId) => {
+    set({ selectedTaskId: taskId });
+  },
+
+  setSelectedTaskId: (taskId) => {
+    set({ selectedTaskId: taskId });
+  },
+
+  initSelectedTaskFromNewest: () => {
+    const newestId = get().newestCreatedTaskId;
+    if (newestId) {
+      set({ selectedTaskId: newestId });
+    }
   },
 
   updateTaskStatus: (taskId, updates) => {
@@ -324,39 +371,115 @@ export const useAppStore = create<AppStore>((set, get) => ({
       )
     }));
     get().addAuditLog({
-      action: '重试运行失败文件',
+      action: '重试所有失败文件',
       actionType: 'execute',
       level: 'info',
       target: taskId,
       targetType: 'migration_task',
-      details: `重试${count}个失败文件`
+      details: `重试所有${count}个可重试失败文件`
+    });
+  },
+
+  batchRetryFailedFiles: (taskId, fileIds) => {
+    const validFiles = get().failedFiles.filter((f) => fileIds.includes(f.id) && f.canRetry);
+    const count = validFiles.length;
+    set((s) => ({
+      failedFiles: s.failedFiles.map((f) =>
+        fileIds.includes(f.id) && f.canRetry
+          ? { ...f, retryCount: f.retryCount + 1, failedAt: getNow() }
+          : f
+      )
+    }));
+    get().addAuditLog({
+      action: '批量重试选中文件',
+      actionType: 'execute',
+      level: 'info',
+      target: taskId,
+      targetType: 'migration_task',
+      details: `批量重试${count}个选中的可重试失败文件`
+    });
+  },
+
+  skipFailedFile: (fileId) => {
+    const file = get().failedFiles.find((f) => f.id === fileId);
+    set((s) => ({
+      skippedFileIds: s.skippedFileIds.includes(fileId)
+        ? s.skippedFileIds
+        : [...s.skippedFileIds, fileId]
+    }));
+    get().addAuditLog({
+      action: '跳过失败文件',
+      actionType: 'update',
+      level: 'warning',
+      target: file?.taskId ?? 'unknown',
+      targetType: 'migration_task',
+      details: `跳过失败文件：${file?.fileName ?? fileId}`
+    });
+  },
+
+  batchSkipFiles: (fileIds) => {
+    const files = get().failedFiles.filter((f) => fileIds.includes(f.id));
+    const taskId = files[0]?.taskId ?? 'unknown';
+    set((s) => {
+      const existing = new Set(s.skippedFileIds);
+      const toAdd = fileIds.filter((id) => !existing.has(id));
+      return { skippedFileIds: [...s.skippedFileIds, ...toAdd] };
+    });
+    get().addAuditLog({
+      action: '批量跳过文件',
+      actionType: 'update',
+      level: 'warning',
+      target: taskId,
+      targetType: 'migration_task',
+      details: `批量跳过${fileIds.length}个文件`
     });
   },
 
   toggleBackupSchedule: (scheduleId) => {
     const schedule = get().backupSchedules.find((s) => s.id === scheduleId);
     if (!schedule) return;
-    const newStatus: 'active' | 'paused' = schedule.status === 'active' ? 'paused' : 'active';
+    const wasActive = schedule.status === 'active';
+    const newStatus: 'active' | 'paused' = wasActive ? 'paused' : 'active';
+    const newEnabled = !wasActive;
     set((s) => ({
       backupSchedules: s.backupSchedules.map((bs) =>
-        bs.id === scheduleId ? { ...bs, status: newStatus } : bs
+        bs.id === scheduleId ? { ...bs, status: newStatus, enabled: newEnabled } : bs
       )
     }));
     get().addAuditLog({
-      action: newStatus === 'active' ? '启用备份计划' : '暂停备份计划',
+      action: newEnabled ? '启用备份计划' : '暂停备份计划',
       actionType: 'update',
-      level: newStatus === 'active' ? 'success' : 'warning',
+      level: newEnabled ? 'success' : 'warning',
       target: scheduleId,
       targetType: 'backup_schedule',
-      details: `${newStatus === 'active' ? '启用' : '暂停'}备份计划：${schedule.name}`
+      details: `${newEnabled ? '启用' : '暂停'}备份计划：${schedule.name}`
     });
   },
 
   createBackupSchedule: (data) => {
+    const enabled = data.enabled ?? true;
+    const status: 'active' | 'paused' = enabled ? 'active' : 'paused';
+    const type: ScheduleType = data.type ?? data.frequency ?? 'daily';
+    const backupType: BackupType = data.backupType ?? 'incremental';
+    const timeOfDay = data.timeOfDay ?? data.scheduleTime ?? '02:00';
+    const daysOfWeek = data.daysOfWeek ?? (data.dayOfWeek !== undefined ? [data.dayOfWeek] : undefined);
+
     const newSchedule: BackupSchedule = {
+      sourceId: '',
+      targetId: '',
+      frequency: type,
+      type,
+      backupType,
+      scheduleTime: timeOfDay,
+      timeOfDay,
+      retentionDays: 30,
+      retentionCount: data.retentionCount,
+      dayOfWeek: data.dayOfWeek,
+      daysOfWeek,
+      enabled,
       ...data,
       id: generateId('bs'),
-      status: 'active',
+      status,
       nextRun: getNow(),
       createdAt: getNow()
     };
@@ -403,8 +526,43 @@ export const useAppStore = create<AppStore>((set, get) => ({
     });
   },
 
+  performRecoveryAndVerify: (data) => {
+    const operator = get().currentOperator;
+    const version = get().backupVersions.find((v) => v.id === data.versionId);
+    const recoveryTaskId = generateId('rt');
+    const newTask: RecoveryTask = {
+      ...data,
+      id: recoveryTaskId,
+      status: 'pending',
+      progress: 0,
+      processedFiles: 0,
+      processedSize: '0 B',
+      createdAt: getNow(),
+      createdBy: operator.name
+    };
+    set((s) => ({ recoveryTasks: [...s.recoveryTasks, newTask] }));
+    get().addAuditLog({
+      action: '创建恢复任务',
+      actionType: 'create',
+      level: 'info',
+      target: newTask.id,
+      targetType: 'recovery_task',
+      details: `创建恢复任务：基于备份版本 ${version?.version ?? data.versionId}，目标路径：${data.targetPath}`
+    });
+
+    get().generateVerification({
+      taskId: recoveryTaskId,
+      name: `${data.name}-恢复校验`,
+      totalFiles: data.totalFiles,
+      type: 'recovery'
+    });
+
+    return recoveryTaskId;
+  },
+
   generateVerification: (data) => {
-    const task = get().migrationTasks.find((t) => t.id === data.taskId);
+    const task = get().migrationTasks.find((t) => t.id === data.taskId) ??
+                 get().recoveryTasks.find((t) => t.id === data.taskId);
     const passed = Math.floor(data.totalFiles * 0.98);
     const failed = Math.max(0, data.totalFiles - passed);
     const newVerification: VerificationResult = {
@@ -418,23 +576,25 @@ export const useAppStore = create<AppStore>((set, get) => ({
       failedFiles: failed,
       startTime: getNow(),
       endTime: getNow(),
-      details: []
+      details: [],
+      type: data.type || 'migration'
     };
     set((s) => ({ verificationResults: [...s.verificationResults, newVerification] }));
+    const typeLabel = data.type === 'recovery' ? '恢复数据校验' : '数据完整性校验';
     get().addAuditLog({
-      action: failed === 0 ? '数据校验通过' : '数据校验发现异常',
+      action: failed === 0 ? `${typeLabel}通过` : `${typeLabel}发现异常`,
       actionType: 'execute',
       level: failed === 0 ? 'success' : 'error',
       target: newVerification.id,
       targetType: 'verification',
-      details: `数据完整性校验${failed === 0 ? '全部通过' : `发现${failed}个文件异常`}：${task?.name ?? data.name}`
+      details: `${typeLabel}${failed === 0 ? '全部通过' : `发现${failed}个文件异常`}：${task?.name ?? data.name}`
     });
     if (failed > 0) {
       const operator = get().currentOperator;
       const newNotification: Notification = {
         id: generateId('nf'),
         userId: operator.id,
-        title: '数据校验发现异常',
+        title: `${typeLabel}发现异常`,
         message: `校验任务发现${failed}个文件完整性校验失败，请及时处理。`,
         type: 'warning',
         read: false,

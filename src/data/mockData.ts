@@ -41,19 +41,25 @@ export interface MigrationTask {
   id: string;
   name: string;
   sourceId: string;
+  sourceIds: string[];
+  sourceNames: string[];
   targetId: string;
   priority: 'low' | 'normal' | 'high' | 'urgent';
+  type: string;
   status: 'pending' | 'running' | 'paused' | 'completed' | 'failed';
   progress: number;
   totalFiles: number;
   completedFiles: number;
   failedFiles: number;
   totalSize: string;
+  totalSizeBytes: number;
   transferredSize: string;
+  filterRuleIds: string[];
   startTime?: string;
   endTime?: string;
   createdAt: string;
   createdBy: string;
+  operatorId: string;
   speed?: string;
   estimatedTime?: string;
 }
@@ -71,15 +77,24 @@ export interface FailedFile {
   canRetry: boolean;
 }
 
+export type ScheduleType = 'daily' | 'weekly' | 'monthly';
+export type BackupType = 'full' | 'incremental';
+
 export interface BackupSchedule {
   id: string;
   name: string;
   sourceId: string;
   targetId: string;
-  frequency: 'daily' | 'weekly' | 'monthly';
+  frequency: ScheduleType;
+  type?: ScheduleType;
+  backupType?: BackupType;
   scheduleTime: string;
+  timeOfDay?: string;
   dayOfWeek?: number;
+  daysOfWeek?: number[];
   retentionDays: number;
+  retentionCount?: number;
+  enabled?: boolean;
   status: 'active' | 'paused';
   lastRun?: string;
   nextRun: string;
@@ -147,6 +162,7 @@ export interface VerificationResult {
   startTime: string;
   endTime: string;
   details: VerificationDetail[];
+  type?: 'migration' | 'recovery';
 }
 
 export const currentOperator: Operator = {
@@ -264,36 +280,48 @@ export const migrationTasks: MigrationTask[] = [
     id: 'mt-001',
     name: '财务文档月度归档',
     sourceId: 'ds-001',
+    sourceIds: ['ds-001'],
+    sourceNames: ['财务文档FTP服务器'],
     targetId: 'tl-001',
     priority: 'high',
+    type: 'migration',
     status: 'completed',
     progress: 100,
     totalFiles: 2450,
     completedFiles: 2448,
     failedFiles: 2,
     totalSize: '8.5 GB',
+    totalSizeBytes: 9126805504,
     transferredSize: '8.5 GB',
+    filterRuleIds: [],
     startTime: '2026-06-01T02:00:00+08:00',
     endTime: '2026-06-01T02:45:30+08:00',
     createdAt: '2026-05-31T16:00:00+08:00',
-    createdBy: '张明'
+    createdBy: '张明',
+    operatorId: 'op-001'
   },
   {
     id: 'mt-002',
     name: '客户资料全量迁移',
     sourceId: 'ds-002',
+    sourceIds: ['ds-002'],
+    sourceNames: ['客户资料WebDAV'],
     targetId: 'tl-002',
     priority: 'urgent',
+    type: 'migration',
     status: 'running',
     progress: 68,
     totalFiles: 34210,
     completedFiles: 23263,
     failedFiles: 15,
     totalSize: '128.7 GB',
+    totalSizeBytes: 138189582336,
     transferredSize: '87.5 GB',
+    filterRuleIds: [],
     startTime: '2026-06-15T20:00:00+08:00',
     createdAt: '2026-06-15T10:00:00+08:00',
     createdBy: '张明',
+    operatorId: 'op-001',
     speed: '12.5 MB/s',
     estimatedTime: '58分钟'
   },
@@ -301,18 +329,24 @@ export const migrationTasks: MigrationTask[] = [
     id: 'mt-003',
     name: '产品图片全量备份',
     sourceId: 'ds-003',
+    sourceIds: ['ds-003'],
+    sourceNames: ['产品图片本地存储'],
     targetId: 'tl-001',
     priority: 'normal',
+    type: 'backup',
     status: 'running',
     progress: 35,
     totalFiles: 58920,
     completedFiles: 20622,
     failedFiles: 8,
     totalSize: '892.3 GB',
+    totalSizeBytes: 958098128896,
     transferredSize: '312.3 GB',
+    filterRuleIds: [],
     startTime: '2026-06-16T00:00:00+08:00',
     createdAt: '2026-06-15T18:30:00+08:00',
     createdBy: '张明',
+    operatorId: 'op-001',
     speed: '25.8 MB/s',
     estimatedTime: '6小时32分钟'
   },
@@ -320,86 +354,116 @@ export const migrationTasks: MigrationTask[] = [
     id: 'mt-004',
     name: '系统日志历史归档',
     sourceId: 'ds-004',
+    sourceIds: ['ds-004'],
+    sourceNames: ['系统日志S3存储'],
     targetId: 'tl-003',
     priority: 'low',
+    type: 'migration',
     status: 'failed',
     progress: 42,
     totalFiles: 50000,
     completedFiles: 21000,
     failedFiles: 125,
     totalSize: '500 GB',
+    totalSizeBytes: 536870912000,
     transferredSize: '210 GB',
+    filterRuleIds: [],
     startTime: '2026-06-14T20:00:00+08:00',
     endTime: '2026-06-15T02:30:00+08:00',
     createdAt: '2026-06-14T15:00:00+08:00',
-    createdBy: '张明'
+    createdBy: '张明',
+    operatorId: 'op-001'
   },
   {
     id: 'mt-005',
     name: '合同文档增量迁移',
     sourceId: 'ds-005',
+    sourceIds: ['ds-005'],
+    sourceNames: ['合同归档业务接口'],
     targetId: 'tl-002',
     priority: 'high',
+    type: 'migration',
     status: 'pending',
     progress: 0,
     totalFiles: 1250,
     completedFiles: 0,
     failedFiles: 0,
     totalSize: '12.5 GB',
+    totalSizeBytes: 13421772800,
     transferredSize: '0 B',
+    filterRuleIds: [],
     createdAt: '2026-06-16T09:00:00+08:00',
-    createdBy: '张明'
+    createdBy: '张明',
+    operatorId: 'op-001'
   },
   {
     id: 'mt-006',
     name: 'Q2财务报告专项迁移',
     sourceId: 'ds-001',
+    sourceIds: ['ds-001'],
+    sourceNames: ['财务文档FTP服务器'],
     targetId: 'tl-002',
     priority: 'urgent',
+    type: 'migration',
     status: 'paused',
     progress: 52,
     totalFiles: 680,
     completedFiles: 354,
     failedFiles: 3,
     totalSize: '3.2 GB',
+    totalSizeBytes: 3435973837,
     transferredSize: '1.7 GB',
+    filterRuleIds: [],
     startTime: '2026-06-15T14:00:00+08:00',
     createdAt: '2026-06-15T09:00:00+08:00',
-    createdBy: '张明'
+    createdBy: '张明',
+    operatorId: 'op-001'
   },
   {
     id: 'mt-007',
     name: '历史客户数据清理迁移',
     sourceId: 'ds-002',
+    sourceIds: ['ds-002'],
+    sourceNames: ['客户资料WebDAV'],
     targetId: 'tl-003',
     priority: 'normal',
+    type: 'migration',
     status: 'completed',
     progress: 100,
     totalFiles: 8500,
     completedFiles: 8492,
     failedFiles: 8,
     totalSize: '45.8 GB',
+    totalSizeBytes: 49175069491,
     transferredSize: '45.8 GB',
+    filterRuleIds: [],
     startTime: '2026-06-10T22:00:00+08:00',
     endTime: '2026-06-11T04:15:00+08:00',
     createdAt: '2026-06-10T10:00:00+08:00',
-    createdBy: '张明'
+    createdBy: '张明',
+    operatorId: 'op-001'
   },
   {
     id: 'mt-008',
     name: '产品宣传图CDN同步',
     sourceId: 'ds-003',
+    sourceIds: ['ds-003'],
+    sourceNames: ['产品图片本地存储'],
     targetId: 'tl-002',
     priority: 'low',
+    type: 'migration',
     status: 'pending',
     progress: 0,
     totalFiles: 15200,
     completedFiles: 0,
     failedFiles: 0,
     totalSize: '256 GB',
+    totalSizeBytes: 274877906944,
     transferredSize: '0 B',
+    filterRuleIds: [],
     createdAt: '2026-06-16T08:00:00+08:00',
-    createdBy: '张明'
+    createdBy: '张明',
+    operatorId: 'op-001'
   }
 ];
 

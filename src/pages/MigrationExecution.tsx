@@ -24,45 +24,13 @@ import {
 import ProgressBar from '@/components/common/ProgressBar';
 import StatusBadge from '@/components/common/StatusBadge';
 import DataTable, { type ColumnDef } from '@/components/common/DataTable';
-import { migrationTasks, failedFiles, dataSources, targetLocations } from '@/data/mockData';
+import { useAppStore } from '@/store/appStore';
+import type { FailedFile, MigrationTask } from '@/data/mockData';
 import type { FileCategory, TaskStatus } from '@/types';
 import { formatDateTime } from '@/utils/formatters';
 import { cn } from '@/lib/utils';
 
 type FailedTab = 'all' | 'network' | 'permission' | 'format';
-
-interface LocalFailedFile {
-  id: string;
-  taskId: string;
-  fileName: string;
-  filePath: string;
-  size: string;
-  errorType: 'network' | 'permission' | 'format' | 'timeout' | 'unknown';
-  errorMessage: string;
-  retryCount: number;
-  failedAt: string;
-  canRetry: boolean;
-}
-
-interface LocalMigrationTask {
-  id: string;
-  name: string;
-  sourceId: string;
-  targetId: string;
-  status: 'pending' | 'running' | 'paused' | 'completed' | 'failed';
-  progress: number;
-  totalFiles: number;
-  completedFiles: number;
-  failedFiles: number;
-  totalSize: string;
-  transferredSize: string;
-  startTime?: string;
-  endTime?: string;
-  createdAt: string;
-  createdBy: string;
-  speed?: string;
-  estimatedTime?: string;
-}
 
 interface CategoryProgress {
   category: FileCategory;
@@ -133,42 +101,65 @@ const INITIAL_LOGS: LogEntry[] = [
 ];
 
 export default function MigrationExecution() {
-  const [selectedTaskId, setSelectedTaskId] = useState<string>('mt-002');
-  const [localTaskStatuses, setLocalTaskStatuses] = useState<Record<string, TaskStatus>>({});
-  const [skippedFileIds, setSkippedFileIds] = useState<Set<string>>(new Set());
+  const {
+    migrationTasks,
+    failedFiles,
+    dataSources,
+    targetLocations,
+    selectedTaskId: storeSelectedTaskId,
+    skippedFileIds,
+    setSelectedTaskId,
+    retryFailedFile,
+    retryAllFailedFiles,
+    batchRetryFailedFiles,
+    skipFailedFile,
+    batchSkipFiles,
+    updateTaskStatus,
+  } = useAppStore();
+
+  const initialTaskId = storeSelectedTaskId || migrationTasks[0]?.id || 'mt-002';
+  const [selectedTaskId, setLocalSelectedTaskId] = useState<string>(initialTaskId);
   const [failedTab, setFailedTab] = useState<FailedTab>('all');
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [currentSpeed, setCurrentSpeed] = useState(12.5);
   const [selectedFailedRows, setSelectedFailedRows] = useState<Set<number>>(new Set());
 
-  const currentTask = useMemo<(LocalMigrationTask & { priority?: string; type?: string }) | null>(() => {
-    const task = migrationTasks.find((t) => t.id === selectedTaskId) as unknown as LocalMigrationTask & { priority?: string; type?: string };
-    if (!task) return null;
-    const overridden = localTaskStatuses[task.id];
-    const enhanced = {
-      ...task,
-      priority: task.id === 'mt-002' ? 'high' : task.id === 'mt-003' ? 'urgent' : task.id === 'mt-001' ? 'normal' : 'normal',
-      type: task.id.includes('backup') || task.id === 'mt-003' ? 'backup' : 'migration',
-    };
-    return overridden ? { ...enhanced, status: overridden as LocalMigrationTask['status'] } : enhanced;
-  }, [selectedTaskId, localTaskStatuses]);
+  useEffect(() => {
+    if (storeSelectedTaskId && storeSelectedTaskId !== selectedTaskId) {
+      setLocalSelectedTaskId(storeSelectedTaskId);
+    }
+  }, [storeSelectedTaskId]);
 
-  const source = useMemo(
-    () => dataSources.find((d) => d.id === currentTask?.sourceId),
-    [currentTask]
-  );
+  const handleTaskChange = (taskId: string) => {
+    setLocalSelectedTaskId(taskId);
+    setSelectedTaskId(taskId);
+    setSelectedFailedRows(new Set());
+  };
+
+  const currentTask = useMemo<MigrationTask | null>(() => {
+    const task = migrationTasks.find((t) => t.id === selectedTaskId);
+    return task ?? null;
+  }, [selectedTaskId, migrationTasks]);
+
+  const sourceList = useMemo(() => {
+    if (!currentTask) return [];
+    const ids = currentTask.sourceIds && currentTask.sourceIds.length > 0
+      ? currentTask.sourceIds
+      : [currentTask.sourceId];
+    return ids.map((id) => dataSources.find((d) => d.id === id)).filter(Boolean);
+  }, [currentTask, dataSources]);
 
   const target = useMemo(
     () => targetLocations.find((t) => t.id === currentTask?.targetId),
-    [currentTask]
+    [currentTask, targetLocations]
   );
 
-  const taskFailedFiles = useMemo<LocalFailedFile[]>(() => {
+  const taskFailedFiles = useMemo<FailedFile[]>(() => {
     if (!currentTask) return [];
-    return (failedFiles as unknown as LocalFailedFile[]).filter(
-      (f) => f.taskId === currentTask.id && !skippedFileIds.has(f.id)
+    return failedFiles.filter(
+      (f) => f.taskId === currentTask.id && !skippedFileIds.includes(f.id)
     );
-  }, [currentTask, skippedFileIds]);
+  }, [currentTask, failedFiles, skippedFileIds]);
 
   const filteredFailedFiles = useMemo(() => {
     if (failedTab === 'all') return taskFailedFiles;
@@ -207,23 +198,30 @@ export default function MigrationExecution() {
     return () => clearInterval(interval);
   }, [currentTask?.status]);
 
-  const updateTaskStatus = (taskId: string, status: LocalMigrationTask['status'] | 'cancelled') => {
-    setLocalTaskStatuses((prev) => ({ ...prev, [taskId]: status as TaskStatus }));
+  const batchRetrySelected = () => {
+    const fileIds = Array.from(selectedFailedRows)
+      .map((idx) => filteredFailedFiles[idx]?.id)
+      .filter(Boolean) as string[];
+    if (fileIds.length > 0 && selectedTaskId) {
+      batchRetryFailedFiles(selectedTaskId, fileIds);
+    }
   };
 
-  const retryFailedFile = (fileId: string) => {
-    console.log('Retry failed file:', fileId);
-  };
-
-  const retryAllFailedFiles = () => {
-    console.log('Retry all failed files for task:', selectedTaskId);
+  const batchSkipSelected = () => {
+    const fileIds = Array.from(selectedFailedRows)
+      .map((idx) => filteredFailedFiles[idx]?.id)
+      .filter(Boolean) as string[];
+    if (fileIds.length > 0) {
+      batchSkipFiles(fileIds);
+      setSelectedFailedRows(new Set());
+    }
   };
 
   const toggleSidebar = () => setSidebarCollapsed((v) => !v);
 
-  const handlePause = () => currentTask && updateTaskStatus(currentTask.id, 'paused');
-  const handleResume = () => currentTask && updateTaskStatus(currentTask.id, 'running');
-  const handleCancel = () => currentTask && updateTaskStatus(currentTask.id, 'cancelled');
+  const handlePause = () => currentTask && updateTaskStatus(currentTask.id, { status: 'paused' });
+  const handleResume = () => currentTask && updateTaskStatus(currentTask.id, { status: 'running' });
+  const handleCancel = () => currentTask && updateTaskStatus(currentTask.id, { status: 'failed' });
   const handleViewLogs = () => setSidebarCollapsed(false);
 
   const isRunning = currentTask?.status === 'running';
@@ -232,7 +230,7 @@ export default function MigrationExecution() {
 
   const completed = currentTask?.completedFiles ?? 0;
   const failed = taskFailedFiles.length;
-  const skipped = skippedFileIds.size;
+  const skipped = skippedFileIds.length;
   const remaining = (currentTask?.totalFiles ?? 0) - completed - failed;
 
   const totalBytes = parseSizeToBytes(currentTask?.totalSize ?? '0 B');
@@ -240,7 +238,7 @@ export default function MigrationExecution() {
   const avgSpeed = 10.8;
   const peakSpeed = 14.6;
 
-  const failedColumns: ColumnDef<LocalFailedFile>[] = [
+  const failedColumns: ColumnDef<FailedFile>[] = [
     {
       id: 'select',
       header: '',
@@ -265,7 +263,7 @@ export default function MigrationExecution() {
     {
       id: 'fileName',
       header: '文件名',
-      accessorKey: 'fileName' as keyof LocalFailedFile,
+      accessorKey: 'fileName' as keyof FailedFile,
       sortable: true,
       cell: (row) => (
         <div className="group relative">
@@ -280,7 +278,7 @@ export default function MigrationExecution() {
     {
       id: 'size',
       header: '大小',
-      accessorKey: 'size' as keyof LocalFailedFile,
+      accessorKey: 'size' as keyof FailedFile,
       sortable: true,
       align: 'right',
       width: '100px',
@@ -289,7 +287,7 @@ export default function MigrationExecution() {
     {
       id: 'errorType',
       header: '错误类型',
-      accessorKey: 'errorType' as keyof LocalFailedFile,
+      accessorKey: 'errorType' as keyof FailedFile,
       sortable: true,
       width: '120px',
       cell: (row) => {
@@ -310,7 +308,7 @@ export default function MigrationExecution() {
     {
       id: 'errorMessage',
       header: '错误信息',
-      accessorKey: 'errorMessage' as keyof LocalFailedFile,
+      accessorKey: 'errorMessage' as keyof FailedFile,
       cell: (row) => (
         <span className="text-slate-500 text-sm">{row.errorMessage}</span>
       ),
@@ -318,7 +316,7 @@ export default function MigrationExecution() {
     {
       id: 'retryCount',
       header: '重试次数',
-      accessorKey: 'retryCount' as keyof LocalFailedFile,
+      accessorKey: 'retryCount' as keyof FailedFile,
       sortable: true,
       align: 'center',
       width: '90px',
@@ -334,7 +332,7 @@ export default function MigrationExecution() {
     {
       id: 'failedAt',
       header: '最后尝试时间',
-      accessorKey: 'failedAt' as keyof LocalFailedFile,
+      accessorKey: 'failedAt' as keyof FailedFile,
       sortable: true,
       width: '170px',
       cell: (row) => (
@@ -374,7 +372,7 @@ export default function MigrationExecution() {
           <button
             onClick={(e) => {
               e.stopPropagation();
-              setSkippedFileIds((prev) => new Set(prev).add(row.id));
+              skipFailedFile(row.id);
             }}
             className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-xs font-medium text-amber-600 bg-amber-50 hover:bg-amber-100 hover:shadow-sm transition-all"
           >
@@ -402,12 +400,12 @@ export default function MigrationExecution() {
               <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-slate-400" />
               <select
                 value={selectedTaskId}
-                onChange={(e) => setSelectedTaskId(e.target.value)}
+                onChange={(e) => handleTaskChange(e.target.value)}
                 className="pl-9 pr-10 py-2.5 bg-white border border-slate-200 rounded-xl text-sm font-medium text-slate-700 shadow-sm focus:outline-none focus:ring-2 focus:ring-primary-500 focus:border-primary-500 appearance-none min-w-[260px] cursor-pointer"
               >
                 {migrationTasks.map((t) => (
                   <option key={t.id} value={t.id}>
-                    {t.name} · {(t as unknown as { type?: string }).type === 'backup' || t.id === 'mt-003' ? '备份' : '迁移'}
+                    {t.name} · {TYPE_LABEL_MAP[t.type ?? 'migration'] ?? '迁移'}
                   </option>
                 ))}
               </select>
@@ -467,7 +465,7 @@ export default function MigrationExecution() {
                     <span
                       className={cn(
                         'inline-flex items-center px-2 py-0.5 rounded-md text-xs font-medium border',
-                        PRIORITY_MAP['high']?.className ?? 'bg-slate-100 text-slate-700',
+                        PRIORITY_MAP[currentTask.priority]?.className ?? 'bg-slate-100 text-slate-700',
                         currentTask.priority === 'high' ? 'border-amber-200' :
                         currentTask.priority === 'urgent' ? 'border-rose-200' :
                         currentTask.priority === 'normal' ? 'border-sky-200' : 'border-slate-200'
@@ -486,9 +484,24 @@ export default function MigrationExecution() {
                     <div className="h-8 rounded-lg bg-slate-100 flex items-center justify-center mb-1.5">
                       <HardDrive className="h-4 w-4 text-slate-500" />
                     </div>
-                    <div className="text-xs text-slate-700 font-medium truncate text-center" title={source?.name}>
-                      {source?.name ?? '--'}
-                    </div>
+                    {sourceList.length <= 1 ? (
+                      <div className="text-xs text-slate-700 font-medium truncate text-center" title={sourceList[0]?.name}>
+                        {sourceList[0]?.name ?? '--'}
+                      </div>
+                    ) : (
+                      <div className="relative group">
+                        <div className="text-xs text-slate-700 font-medium text-center">
+                          <span className="inline-flex items-center gap-1 px-2 py-0.5 bg-slate-100 rounded-full">
+                            {sourceList.length} 个来源
+                          </span>
+                        </div>
+                        <div className="absolute z-20 left-1/2 -translate-x-1/2 top-full mt-1 px-3 py-2 bg-slate-800 text-white text-xs rounded-lg opacity-0 invisible group-hover:opacity-100 group-hover:visible transition-all whitespace-nowrap shadow-xl pointer-events-none">
+                          {sourceList.map((s) => (
+                            <div key={s?.id}>{s?.name}</div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
                   </div>
                   <ArrowRight className="h-5 w-5 text-slate-300 flex-shrink-0" />
                   <div className="flex-1 min-w-0">
@@ -512,7 +525,7 @@ export default function MigrationExecution() {
                     张
                   </div>
                   <div className="flex-1 min-w-0">
-                    <div className="font-semibold text-slate-900 truncate">张明</div>
+                    <div className="font-semibold text-slate-900 truncate">{currentTask?.createdBy ?? '--'}</div>
                     <div className="text-xs text-slate-500 mt-0.5">运维管理员</div>
                   </div>
                 </div>
@@ -571,7 +584,9 @@ export default function MigrationExecution() {
                     <div className="font-mono text-2xl font-bold text-slate-900">
                       {formatNumber(currentTask?.totalFiles ?? 0)}
                     </div>
-                    <div className="text-xs text-slate-400 mt-1">待处理文件总数</div>
+                    <div className="text-xs text-slate-400 mt-1">
+                      总规模 {currentTask?.totalSize ?? '0 B'}
+                    </div>
                   </div>
                   <div className="p-4 rounded-xl bg-emerald-50 border border-emerald-100">
                     <div className="text-xs text-emerald-600 mb-1">已完成</div>
@@ -586,7 +601,7 @@ export default function MigrationExecution() {
                     <div className="flex items-center justify-between mb-1">
                       <div className="text-xs text-rose-600">失败中</div>
                       <button
-                        onClick={() => retryAllFailedFiles()}
+                        onClick={() => retryAllFailedFiles(selectedTaskId)}
                         disabled={retryableCount === 0}
                         className={cn(
                           'inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-xs font-medium transition-all',
@@ -774,15 +789,20 @@ export default function MigrationExecution() {
 
               <div className="px-6 py-3 border-b border-slate-100 bg-slate-50/60 flex flex-wrap items-center gap-2">
                 <span className="text-xs text-slate-500">
+                  共失败 <strong className="text-slate-700">{taskFailedFiles.length}</strong> 个 · 可重试 <strong className="text-emerald-600">{retryableCount}</strong> 个 · 已跳过 <strong className="text-amber-600">{skipped}</strong> 个
+                </span>
+                <span className="text-xs text-slate-400 mx-2">|</span>
+                <span className="text-xs text-slate-500">
                   已选中 <strong className="text-slate-700">{selectedFailedRows.size}</strong> 项
                 </span>
                 <div className="flex-1" />
                 <button
+                  onClick={batchRetrySelected}
                   disabled={selectedFailedRows.size === 0}
                   className={cn(
                     'inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium transition-all',
                     selectedFailedRows.size > 0
-                      ? 'bg-emerald-500 text-white hover:bg-emerald-600 shadow-sm shadow-emerald-500/20'
+                      ? 'bg-primary-600 text-white hover:bg-primary-700 shadow-sm shadow-primary-500/20'
                       : 'bg-slate-100 text-slate-400 cursor-not-allowed'
                   )}
                 >
@@ -790,6 +810,7 @@ export default function MigrationExecution() {
                   批量重试选中
                 </button>
                 <button
+                  onClick={batchSkipSelected}
                   disabled={selectedFailedRows.size === 0}
                   className={cn(
                     'inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium transition-all',
@@ -799,20 +820,32 @@ export default function MigrationExecution() {
                   )}
                 >
                   <SkipForward className="h-3.5 w-3.5" />
-                  批量跳过选中
+                  跳过选中文件
                 </button>
                 <button
+                  onClick={() => retryAllFailedFiles(selectedTaskId)}
                   disabled={retryableCount === 0}
-                  onClick={() => retryAllFailedFiles()}
                   className={cn(
                     'inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium transition-all',
                     retryableCount > 0
-                      ? 'bg-primary-600 text-white hover:bg-primary-700 shadow-sm shadow-primary-500/20'
+                      ? 'bg-emerald-500 text-white hover:bg-emerald-600 shadow-sm shadow-emerald-500/20'
                       : 'bg-slate-100 text-slate-400 cursor-not-allowed'
                   )}
                 >
                   <RefreshCw className="h-3.5 w-3.5" />
                   重试全部可重试
+                </button>
+                <button
+                  onClick={() => setSelectedFailedRows(new Set())}
+                  disabled={selectedFailedRows.size === 0}
+                  className={cn(
+                    'inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium transition-all border',
+                    selectedFailedRows.size > 0
+                      ? 'bg-white border-slate-200 text-slate-600 hover:bg-slate-50'
+                      : 'bg-slate-50 border-slate-100 text-slate-400 cursor-not-allowed'
+                  )}
+                >
+                  清空选中
                 </button>
               </div>
 

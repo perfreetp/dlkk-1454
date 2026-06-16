@@ -8,6 +8,7 @@ interface TimelineItem {
   description?: ReactNode;
   color?: string;
   content?: ReactNode;
+  active?: boolean;
 }
 
 interface TimelineProps {
@@ -29,16 +30,25 @@ export default function Timeline({ items }: TimelineProps) {
       <div className="absolute left-4 top-2 bottom-2 w-0.5 bg-slate-200" />
       <ul className="space-y-6">
         {items.map((item) => (
-          <li key={item.id} className="relative pl-12">
+          <li key={item.id} data-version-id={item.id} className="relative pl-12 cursor-pointer">
             <div
               className={cn(
-                'absolute left-2 top-1.5 w-5 h-5 rounded-full ring-4',
-                colorMap[item.color || 'primary'] || colorMap.primary
+                'absolute left-2 top-1.5 w-5 h-5 rounded-full ring-4 transition-all',
+                colorMap[item.color || 'primary'] || colorMap.primary,
+                item.active && 'scale-110 ring-primary-300'
               )}
             />
-            <div className="bg-white rounded-lg shadow-card p-4 hover:shadow-card-hover transition-shadow duration-200">
+            <div className={cn(
+              'bg-white rounded-lg shadow-card p-4 hover:shadow-card-hover transition-shadow duration-200',
+              item.active && 'ring-2 ring-primary-400 bg-primary-50/30 shadow-card-hover'
+            )}>
               <div className="flex items-center justify-between gap-4 mb-1">
-                <h4 className="font-semibold text-slate-900">{item.title}</h4>
+                <h4 className={cn(
+                  'font-semibold text-slate-900',
+                  item.active && 'text-primary-700 font-bold'
+                )}>
+                  {item.title}
+                </h4>
                 <span className="text-xs text-slate-400 font-mono whitespace-nowrap">
                   {item.timestamp}
                 </span>
