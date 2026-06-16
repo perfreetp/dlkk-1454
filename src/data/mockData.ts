@@ -75,6 +75,9 @@ export interface FailedFile {
   retryCount: number;
   failedAt: string;
   canRetry: boolean;
+  processingStatus?: 'pending' | 'processing' | 'resolved' | 'skipped' | 'failed';
+  resolvedAt?: string;
+  resolutionNote?: string;
 }
 
 export type ScheduleType = 'daily' | 'weekly' | 'monthly';
@@ -468,21 +471,21 @@ export const migrationTasks: MigrationTask[] = [
 ];
 
 export const failedFiles: FailedFile[] = [
-  { id: 'ff-001', taskId: 'mt-001', fileName: '2024-审计报告-最终版.xlsx', filePath: '/finance/audit/2024/audit_final.xlsx', size: '15.2 MB', errorType: 'permission', errorMessage: '目标路径无写入权限', retryCount: 3, failedAt: '2026-06-01T02:32:15+08:00', canRetry: true },
-  { id: 'ff-002', taskId: 'mt-001', fileName: '税务申报表-加密版.pdf', filePath: '/finance/tax/2024/tax_encrypted.pdf', size: '8.7 MB', errorType: 'format', errorMessage: '文件格式损坏或无法识别', retryCount: 2, failedAt: '2026-06-01T02:40:05+08:00', canRetry: false },
-  { id: 'ff-003', taskId: 'mt-002', fileName: '客户联系方式-批量导入.csv', filePath: '/crm/contacts/import/batch_001.csv', size: '2.1 MB', errorType: 'network', errorMessage: '连接超时：读取远端数据失败', retryCount: 1, failedAt: '2026-06-15T21:15:30+08:00', canRetry: true },
-  { id: 'ff-004', taskId: 'mt-002', fileName: '客户合同扫描件-0892.jpg', filePath: '/crm/contracts/2024/contract_0892.jpg', size: '45.8 MB', errorType: 'timeout', errorMessage: '数据传输超时', retryCount: 2, failedAt: '2026-06-15T22:08:42+08:00', canRetry: true },
-  { id: 'ff-005', taskId: 'mt-002', fileName: 'VIP客户信息表-机密.xlsx', filePath: '/crm/vip/customer_info_vip.xlsx', size: '12.4 MB', errorType: 'permission', errorMessage: '源文件访问被拒绝', retryCount: 3, failedAt: '2026-06-15T23:25:10+08:00', canRetry: false },
-  { id: 'ff-006', taskId: 'mt-003', fileName: '产品主图-SKU8821.tiff', filePath: '/products/2024/SKU8821/main.tiff', size: '128.5 MB', errorType: 'format', errorMessage: '不支持的文件格式或编码', retryCount: 1, failedAt: '2026-06-16T00:45:20+08:00', canRetry: false },
-  { id: 'ff-007', taskId: 'mt-003', fileName: '产品详情页-高清.psd', filePath: '/products/marketing/detail_hd.psd', size: '892.1 MB', errorType: 'network', errorMessage: '网络中断：连接被重置', retryCount: 2, failedAt: '2026-06-16T01:30:55+08:00', canRetry: true },
-  { id: 'ff-008', taskId: 'mt-003', fileName: '产品3D渲染图-2024系列.zip', filePath: '/products/3d/2024/3d_render.zip', size: '2.4 GB', errorType: 'timeout', errorMessage: '文件上传超过最大时间限制', retryCount: 1, failedAt: '2026-06-16T02:12:33+08:00', canRetry: true },
-  { id: 'ff-009', taskId: 'mt-004', fileName: '系统日志-2024-05-01.tar.gz', filePath: '/logs/archive/2024/2024-05-01.tar.gz', size: '456.7 MB', errorType: 'network', errorMessage: 'S3连接错误：无法访问存储端点', retryCount: 5, failedAt: '2026-06-14T22:18:40+08:00', canRetry: true },
-  { id: 'ff-010', taskId: 'mt-004', fileName: '应用日志-异常堆栈-2024-03.log', filePath: '/logs/app/error_stack_202403.log', size: '89.2 MB', errorType: 'unknown', errorMessage: '未知错误：校验和不匹配', retryCount: 3, failedAt: '2026-06-14T23:05:12+08:00', canRetry: false },
-  { id: 'ff-011', taskId: 'mt-004', fileName: '数据库慢查询日志-April.sql', filePath: '/logs/db/slow_query_april.sql', size: '1.2 GB', errorType: 'timeout', errorMessage: '数据读取超时', retryCount: 2, failedAt: '2026-06-15T00:42:58+08:00', canRetry: true },
-  { id: 'ff-012', taskId: 'mt-006', fileName: 'Q2-利润分析表-草稿.xlsx', filePath: '/finance/Q2/draft_profit_analysis.xlsx', size: '6.8 MB', errorType: 'permission', errorMessage: '文件被其他用户锁定', retryCount: 2, failedAt: '2026-06-15T14:35:22+08:00', canRetry: true },
-  { id: 'ff-013', taskId: 'mt-006', fileName: '部门预算执行报表.pptx', filePath: '/finance/Q2/budget_execution.pptx', size: '24.5 MB', errorType: 'network', errorMessage: '临时网络波动导致传输中断', retryCount: 1, failedAt: '2026-06-15T15:08:15+08:00', canRetry: true },
-  { id: 'ff-014', taskId: 'mt-007', fileName: '历史客户-已注销-2020批量.dat', filePath: '/crm/archive/2020/customer_closed_batch.dat', size: '156.3 MB', errorType: 'format', errorMessage: '二进制文件格式无法解析', retryCount: 1, failedAt: '2026-06-11T02:18:44+08:00', canRetry: false },
-  { id: 'ff-015', taskId: 'mt-007', fileName: '客户画像分析-旧版.odt', filePath: '/crm/analysis/old_customer_profile.odt', size: '4.2 MB', errorType: 'unknown', errorMessage: '文件转换失败', retryCount: 2, failedAt: '2026-06-11T03:45:08+08:00', canRetry: false }
+  { id: 'ff-001', taskId: 'mt-001', fileName: '2024-审计报告-最终版.xlsx', filePath: '/finance/audit/2024/audit_final.xlsx', size: '15.2 MB', errorType: 'permission', errorMessage: '目标路径无写入权限', retryCount: 3, failedAt: '2026-06-01T02:32:15+08:00', canRetry: true, processingStatus: 'pending' },
+  { id: 'ff-002', taskId: 'mt-001', fileName: '税务申报表-加密版.pdf', filePath: '/finance/tax/2024/tax_encrypted.pdf', size: '8.7 MB', errorType: 'format', errorMessage: '文件格式损坏或无法识别', retryCount: 2, failedAt: '2026-06-01T02:40:05+08:00', canRetry: false, processingStatus: 'failed' },
+  { id: 'ff-003', taskId: 'mt-002', fileName: '客户联系方式-批量导入.csv', filePath: '/crm/contacts/import/batch_001.csv', size: '2.1 MB', errorType: 'network', errorMessage: '连接超时：读取远端数据失败', retryCount: 1, failedAt: '2026-06-15T21:15:30+08:00', canRetry: true, processingStatus: 'pending' },
+  { id: 'ff-004', taskId: 'mt-002', fileName: '客户合同扫描件-0892.jpg', filePath: '/crm/contracts/2024/contract_0892.jpg', size: '45.8 MB', errorType: 'timeout', errorMessage: '数据传输超时', retryCount: 2, failedAt: '2026-06-15T22:08:42+08:00', canRetry: true, processingStatus: 'pending' },
+  { id: 'ff-005', taskId: 'mt-002', fileName: 'VIP客户信息表-机密.xlsx', filePath: '/crm/vip/customer_info_vip.xlsx', size: '12.4 MB', errorType: 'permission', errorMessage: '源文件访问被拒绝', retryCount: 3, failedAt: '2026-06-15T23:25:10+08:00', canRetry: false, processingStatus: 'failed' },
+  { id: 'ff-006', taskId: 'mt-003', fileName: '产品主图-SKU8821.tiff', filePath: '/products/2024/SKU8821/main.tiff', size: '128.5 MB', errorType: 'format', errorMessage: '不支持的文件格式或编码', retryCount: 1, failedAt: '2026-06-16T00:45:20+08:00', canRetry: false, processingStatus: 'failed' },
+  { id: 'ff-007', taskId: 'mt-003', fileName: '产品详情页-高清.psd', filePath: '/products/marketing/detail_hd.psd', size: '892.1 MB', errorType: 'network', errorMessage: '网络中断：连接被重置', retryCount: 2, failedAt: '2026-06-16T01:30:55+08:00', canRetry: true, processingStatus: 'pending' },
+  { id: 'ff-008', taskId: 'mt-003', fileName: '产品3D渲染图-2024系列.zip', filePath: '/products/3d/2024/3d_render.zip', size: '2.4 GB', errorType: 'timeout', errorMessage: '文件上传超过最大时间限制', retryCount: 1, failedAt: '2026-06-16T02:12:33+08:00', canRetry: true, processingStatus: 'pending' },
+  { id: 'ff-009', taskId: 'mt-004', fileName: '系统日志-2024-05-01.tar.gz', filePath: '/logs/archive/2024/2024-05-01.tar.gz', size: '456.7 MB', errorType: 'network', errorMessage: 'S3连接错误：无法访问存储端点', retryCount: 5, failedAt: '2026-06-14T22:18:40+08:00', canRetry: true, processingStatus: 'pending' },
+  { id: 'ff-010', taskId: 'mt-004', fileName: '应用日志-异常堆栈-2024-03.log', filePath: '/logs/app/error_stack_202403.log', size: '89.2 MB', errorType: 'unknown', errorMessage: '未知错误：校验和不匹配', retryCount: 3, failedAt: '2026-06-14T23:05:12+08:00', canRetry: false, processingStatus: 'failed' },
+  { id: 'ff-011', taskId: 'mt-004', fileName: '数据库慢查询日志-April.sql', filePath: '/logs/db/slow_query_april.sql', size: '1.2 GB', errorType: 'timeout', errorMessage: '数据读取超时', retryCount: 2, failedAt: '2026-06-15T00:42:58+08:00', canRetry: true, processingStatus: 'pending' },
+  { id: 'ff-012', taskId: 'mt-006', fileName: 'Q2-利润分析表-草稿.xlsx', filePath: '/finance/Q2/draft_profit_analysis.xlsx', size: '6.8 MB', errorType: 'permission', errorMessage: '文件被其他用户锁定', retryCount: 2, failedAt: '2026-06-15T14:35:22+08:00', canRetry: true, processingStatus: 'pending' },
+  { id: 'ff-013', taskId: 'mt-006', fileName: '部门预算执行报表.pptx', filePath: '/finance/Q2/budget_execution.pptx', size: '24.5 MB', errorType: 'network', errorMessage: '临时网络波动导致传输中断', retryCount: 1, failedAt: '2026-06-15T15:08:15+08:00', canRetry: true, processingStatus: 'pending' },
+  { id: 'ff-014', taskId: 'mt-007', fileName: '历史客户-已注销-2020批量.dat', filePath: '/crm/archive/2020/customer_closed_batch.dat', size: '156.3 MB', errorType: 'format', errorMessage: '二进制文件格式无法解析', retryCount: 1, failedAt: '2026-06-11T02:18:44+08:00', canRetry: false, processingStatus: 'failed' },
+  { id: 'ff-015', taskId: 'mt-007', fileName: '客户画像分析-旧版.odt', filePath: '/crm/analysis/old_customer_profile.odt', size: '4.2 MB', errorType: 'unknown', errorMessage: '文件转换失败', retryCount: 2, failedAt: '2026-06-11T03:45:08+08:00', canRetry: false, processingStatus: 'failed' }
 ];
 
 export const backupSchedules: BackupSchedule[] = [
@@ -599,6 +602,7 @@ export const verificationResults: VerificationResult[] = [
     failedFiles: 0,
     startTime: '2026-06-01T03:00:00+08:00',
     endTime: '2026-06-01T03:08:45+08:00',
+    type: 'migration',
     details: [
       { id: 'vd-001', fileName: 'report_q1.xlsx', expectedHash: 'a1b2c3d4e5f60001', actualHash: 'a1b2c3d4e5f60001', status: 'passed', sizeMatch: true },
       { id: 'vd-002', fileName: 'invoice_may.pdf', expectedHash: 'b2c3d4e5f6a10002', actualHash: 'b2c3d4e5f6a10002', status: 'passed', sizeMatch: true },
@@ -618,6 +622,7 @@ export const verificationResults: VerificationResult[] = [
     failedFiles: 3,
     startTime: '2026-06-11T05:00:00+08:00',
     endTime: '2026-06-11T05:42:20+08:00',
+    type: 'migration',
     details: [
       { id: 'vd-006', fileName: 'customer_0001.json', expectedHash: 'f6a1b2c3d4e50006', actualHash: 'f6a1b2c3d4e50006', status: 'passed', sizeMatch: true },
       { id: 'vd-007', fileName: 'customer_0892.json', expectedHash: 'a1b2c3f6e5d40007', actualHash: 'b2c3d4a1f6e50077', status: 'failed', sizeMatch: true },
@@ -639,6 +644,7 @@ export const verificationResults: VerificationResult[] = [
     failedFiles: 0,
     startTime: '2026-06-14T03:30:00+08:00',
     endTime: '2026-06-14T03:55:10+08:00',
+    type: 'recovery',
     details: [
       { id: 'vd-013', fileName: 'balance_sheet.xlsx', expectedHash: '001a1b2c3d4e5f60', actualHash: '001a1b2c3d4e5f60', status: 'passed', sizeMatch: true },
       { id: 'vd-014', fileName: 'income_statement.xlsx', expectedHash: '002b2c3d4e5f6a10', actualHash: '002b2c3d4e5f6a10', status: 'passed', sizeMatch: true },

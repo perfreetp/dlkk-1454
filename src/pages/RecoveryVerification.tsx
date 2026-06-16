@@ -33,6 +33,8 @@ import {
   Calendar,
   Hash,
   Package,
+  List,
+  Copy,
 } from 'lucide-react';
 import DataTable, { type ColumnDef } from '@/components/common/DataTable';
 import ProgressBar from '@/components/common/ProgressBar';
@@ -224,8 +226,14 @@ export default function RecoveryVerification() {
   const location = useLocation();
   const locationState = location.state as { defaultTab?: TabKey } | null;
   const [activeTab, setActiveTab] = useState<TabKey>(locationState?.defaultTab || 'compare');
+  const [showRecoveryDrawer, setShowRecoveryDrawer] = useState(false);
+  const [expandedVerificationId, setExpandedVerificationId] = useState<string | null>(null);
 
   const store = useAppStore();
+
+  const unfinishedRecoveryCount = useMemo(() => {
+    return store.recoveryTasks.filter((t) => t.status === 'pending' || t.status === 'running').length;
+  }, [store.recoveryTasks]);
 
   useEffect(() => {
     if (locationState?.defaultTab) {
@@ -233,12 +241,35 @@ export default function RecoveryVerification() {
     }
   }, [locationState?.defaultTab]);
 
+  const handleViewVerificationReport = (taskId: string) => {
+    const vr = store.verificationResults.find((v) => v.taskId === taskId);
+    if (vr) {
+      setActiveTab('verification');
+      setExpandedVerificationId(vr.id);
+      setShowRecoveryDrawer(false);
+    }
+  };
+
   return (
     <div className="min-h-screen bg-slate-50">
       <div className="p-6">
-        <div className="mb-6">
-          <h1 className="text-2xl font-bold text-slate-900 mb-2">备份恢复与数据校验</h1>
-          <p className="text-sm text-slate-500">对比备份版本差异、执行数据恢复、验证数据完整性</p>
+        <div className="mb-6 flex flex-wrap items-start justify-between gap-4">
+          <div>
+            <h1 className="text-2xl font-bold text-slate-900 mb-2">备份恢复与数据校验</h1>
+            <p className="text-sm text-slate-500">对比备份版本差异、执行数据恢复、验证数据完整性</p>
+          </div>
+          <button
+            onClick={() => setShowRecoveryDrawer(true)}
+            className="relative inline-flex items-center gap-2 px-4 py-2.5 bg-white border border-slate-200 text-slate-700 rounded-xl text-sm font-medium hover:bg-slate-50 hover:border-slate-300 shadow-sm transition-all active:scale-95"
+          >
+            <List className="h-4 w-4" />
+            恢复任务
+            {unfinishedRecoveryCount > 0 && (
+              <span className="absolute -top-1.5 -right-1.5 inline-flex items-center justify-center min-w-[20px] h-5 px-1.5 rounded-full bg-rose-500 text-white text-[10px] font-bold">
+                {unfinishedRecoveryCount > 99 ? '99+' : unfinishedRecoveryCount}
+              </span>
+            )}
+          </button>
         </div>
 
         <div className="bg-white rounded-xl shadow-card border border-slate-100 overflow-hidden">
@@ -270,10 +301,21 @@ export default function RecoveryVerification() {
           <div className="p-6">
             {activeTab === 'compare' && <VersionCompareTab />}
             {activeTab === 'recovery' && <RecoveryTab />}
-            {activeTab === 'verification' && <VerificationTab />}
+            {activeTab === 'verification' && (
+              <VerificationTab
+                expandedId={expandedVerificationId}
+                onExpandedChange={setExpandedVerificationId}
+              />
+            )}
           </div>
         </div>
       </div>
+
+      <RecoveryTaskDrawer
+        open={showRecoveryDrawer}
+        onClose={() => setShowRecoveryDrawer(false)}
+        onViewVerificationReport={handleViewVerificationReport}
+      />
     </div>
   );
 }
@@ -1425,9 +1467,14 @@ function ConfirmModal({
   );
 }
 
-function VerificationTab() {
+interface VerificationTabProps {
+  expandedId?: string | null;
+  onExpandedChange?: (id: string | null) => void;
+}
+
+function VerificationTab({ expandedId, onExpandedChange }: VerificationTabProps) {
   const store = useAppStore();
-  const [expandedId, setExpandedId] = useState<string | null>(null);
+  const [internalExpandedId, setInternalExpandedId] = useState<string | null>(null);
   const [showNewVerification, setShowNewVerification] = useState(false);
   const [newTaskId, setNewTaskId] = useState<string>('');
   const [newVerificationType, setNewVerificationType] = useState<'migration' | 'recovery'>('migration');
@@ -1435,20 +1482,94 @@ function VerificationTab() {
   const [showSuccess, setShowSuccess] = useState(false);
 
   const verificationResults = store.verificationResults;
-  const tasks = migrationTasks;
+  const migrationTaskList = migrationTasks;
+  const recoveryTaskList = store.recoveryTasks;
+
+  const effectiveExpandedId = expandedId !== undefined ? expandedId : internalExpandedId;
+  const setEffectiveExpandedId = (id: string | null) => {
+    if (onExpandedChange) {
+      onExpandedChange(id);
+    } else {
+      setInternalExpandedId(id);
+    }
+  };
+
+  useEffect(() => {
+    if (expandedId) {
+      const el = document.getElementById(`verification-card-${expandedId}`);
+      if (el) {
+        el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      }
+    }
+  }, [expandedId]);
 
   const handleGenerateVerification = () => {
     if (!newTaskId) return;
-    const task = tasks.find((t) => t.id === newTaskId);
-    store.generateVerification({
+
+    let taskTotalFiles = 100;
+    let taskName = '任务';
+
+    if (newVerificationType === 'migration') {
+      const task = migrationTaskList.find((t) => t.id === newTaskId);
+      if (task) {
+        taskTotalFiles = task.totalFiles;
+        taskName = task.name;
+      }
+    } else {
+      const task = recoveryTaskList.find((t) => t.id === newTaskId);
+      if (task) {
+        taskTotalFiles = task.totalFiles;
+        taskName = task.name;
+      }
+    }
+
+    const newVrId = store.generateVerification({
       taskId: newTaskId,
-      name: `${task?.name || '任务'}-${newVerificationType === 'migration' ? '迁移校验' : '恢复校验'}-${algorithm}`,
-      totalFiles: task?.totalFiles || 100,
+      name: `${taskName}-${newVerificationType === 'migration' ? '迁移校验' : '恢复校验'}-${algorithm}`,
+      totalFiles: taskTotalFiles,
+      type: newVerificationType,
     });
+
     setShowNewVerification(false);
     setNewTaskId('');
     setShowSuccess(true);
     setTimeout(() => setShowSuccess(false), 3000);
+
+    setTimeout(() => {
+      setEffectiveExpandedId(newVrId);
+      const el = document.getElementById(`verification-card-${newVrId}`);
+      if (el) {
+        el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      }
+    }, 100);
+  };
+
+  const getTypeBadge = (type?: 'migration' | 'recovery') => {
+    if (type === 'recovery') {
+      return (
+        <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[10px] font-semibold border bg-rose-50 text-rose-700 border-rose-200">
+          恢复校验
+        </span>
+      );
+    }
+    if (type === 'migration') {
+      return (
+        <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[10px] font-semibold border bg-sky-50 text-sky-700 border-sky-200">
+          迁移校验
+        </span>
+      );
+    }
+    return (
+      <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[10px] font-semibold border bg-slate-100 text-slate-600 border-slate-200">
+        校验
+      </span>
+    );
+  };
+
+  const openNewVerificationModal = () => {
+    setNewVerificationType('migration');
+    setNewTaskId(migrationTaskList[0]?.id || '');
+    setShowNewVerification(true);
   };
 
   return (
@@ -1474,10 +1595,7 @@ function VerificationTab() {
           <p className="text-sm text-slate-500 mt-1">查看数据完整性校验结果，确保迁移/恢复数据准确无误</p>
         </div>
         <button
-          onClick={() => {
-            setNewTaskId(tasks[0]?.id || '');
-            setShowNewVerification(true);
-          }}
+          onClick={openNewVerificationModal}
           className="inline-flex items-center gap-2 px-4 py-2.5 bg-emerald-600 text-white rounded-xl text-sm font-medium hover:bg-emerald-700 shadow-sm shadow-emerald-500/20 transition-all active:scale-95"
         >
           <Plus className="h-4 w-4" />
@@ -1509,27 +1627,27 @@ function VerificationTab() {
               statusConfig = { label: '部分通过', dot: 'bg-amber-500', bg: 'bg-amber-50', text: 'text-amber-700' };
             }
 
-            const isExpanded = expandedId === result.id;
+            const isExpanded = effectiveExpandedId === result.id;
+            const isHighlighted = expandedId === result.id;
             const details = generateMockVerificationDetails(result);
 
             return (
               <div
                 key={result.id}
-                className="bg-white rounded-xl border border-slate-200 overflow-hidden"
+                id={`verification-card-${result.id}`}
+                className={cn(
+                  'bg-white rounded-xl border overflow-hidden transition-all',
+                  isHighlighted
+                    ? 'border-primary-400 ring-2 ring-primary-100 shadow-lg'
+                    : 'border-slate-200'
+                )}
               >
                 <div className="p-5">
                   <div className="flex flex-wrap items-start justify-between gap-4">
                     <div className="flex-1 min-w-0">
                       <div className="flex flex-wrap items-center gap-3 mb-2">
                         <h3 className="font-bold text-slate-900 truncate">{result.name}</h3>
-                        <span className={cn(
-                          'inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[10px] font-semibold border',
-                          result.type === 'recovery'
-                            ? 'bg-rose-50 text-rose-700 border-rose-200'
-                            : 'bg-sky-50 text-sky-700 border-sky-200'
-                        )}>
-                          {result.type === 'recovery' ? '恢复校验' : '迁移校验'}
-                        </span>
+                        {getTypeBadge(result.type)}
                         <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[10px] font-semibold bg-slate-100 text-slate-600 border border-slate-200">
                           <Hash className="h-3 w-3" />
                           {algorithm}
@@ -1560,7 +1678,7 @@ function VerificationTab() {
                         <StatMini label="缺失" value={missing.toLocaleString()} color={missing > 0 ? 'rose' : 'slate'} />
                       </div>
                       <button
-                        onClick={() => setExpandedId(isExpanded ? null : result.id)}
+                        onClick={() => setEffectiveExpandedId(isExpanded ? null : result.id)}
                         className="inline-flex items-center gap-1.5 px-3 py-2 bg-slate-50 border border-slate-200 rounded-lg text-xs font-medium text-slate-600 hover:bg-slate-100 transition-all"
                       >
                         <Eye className="h-3.5 w-3.5" />
@@ -1622,39 +1740,61 @@ function VerificationTab() {
 
             <div className="p-6 space-y-5">
               <div>
-                <label className="block text-xs font-medium text-slate-600 mb-2">选择任务</label>
-                <select
-                  value={newTaskId}
-                  onChange={(e) => setNewTaskId(e.target.value)}
-                  className="w-full px-3 py-2.5 bg-white border border-slate-200 rounded-lg text-sm font-medium text-slate-700 focus:outline-none focus:ring-2 focus:ring-primary-500 focus:border-primary-500 appearance-none cursor-pointer"
-                >
-                  <option value="">-- 请选择任务 --</option>
-                  {tasks.map((t) => (
-                    <option key={t.id} value={t.id}>
-                      {t.name}（{t.totalFiles.toLocaleString()} 文件 · {t.totalSize}）
-                    </option>
-                  ))}
-                </select>
-              </div>
-
-              <div>
                 <label className="block text-xs font-medium text-slate-600 mb-2">校验类型</label>
                 <div className="grid grid-cols-2 gap-2">
                   <RadioOption
                     checked={newVerificationType === 'migration'}
-                    onChange={() => setNewVerificationType('migration')}
+                    onChange={() => {
+                      setNewVerificationType('migration');
+                      setNewTaskId(migrationTaskList[0]?.id || '');
+                    }}
                     label="迁移校验"
                     description="校验源与目标数据一致性"
                     compact
                   />
                   <RadioOption
                     checked={newVerificationType === 'recovery'}
-                    onChange={() => setNewVerificationType('recovery')}
+                    onChange={() => {
+                      setNewVerificationType('recovery');
+                      setNewTaskId(recoveryTaskList[0]?.id || '');
+                    }}
                     label="恢复校验"
                     description="校验恢复后数据完整性"
                     compact
                   />
                 </div>
+              </div>
+
+              <div>
+                <label className="block text-xs font-medium text-slate-600 mb-2">
+                  选择{newVerificationType === 'migration' ? '迁移' : '恢复'}任务
+                </label>
+                <select
+                  value={newTaskId}
+                  onChange={(e) => setNewTaskId(e.target.value)}
+                  className="w-full px-3 py-2.5 bg-white border border-slate-200 rounded-lg text-sm font-medium text-slate-700 focus:outline-none focus:ring-2 focus:ring-primary-500 focus:border-primary-500 appearance-none cursor-pointer"
+                >
+                  <option value="">-- 请选择任务 --</option>
+                  {newVerificationType === 'migration' ? (
+                    migrationTaskList.map((t) => (
+                      <option key={t.id} value={t.id}>
+                        【迁移】{t.name}（{t.totalFiles.toLocaleString()} 文件 · {t.totalSize}）
+                      </option>
+                    ))
+                  ) : (
+                    recoveryTaskList.length > 0 ? (
+                      recoveryTaskList.map((t) => (
+                        <option key={t.id} value={t.id}>
+                          【恢复】{t.name}（{t.totalFiles.toLocaleString()} 文件 · {t.totalSize}）
+                        </option>
+                      ))
+                    ) : (
+                      <option value="" disabled>
+                        暂无恢复任务，请先从恢复 Tab 创建
+                      </option>
+                    )
+                  )}
+                </select>
               </div>
 
               <div>
@@ -1681,10 +1821,25 @@ function VerificationTab() {
                 <div className="p-4 rounded-xl bg-primary-50 border border-primary-100">
                   <div className="text-xs font-semibold text-primary-700 mb-2">执行预览</div>
                   <div className="text-xs text-slate-600 space-y-1">
-                    <div>任务：<span className="font-medium">{tasks.find(t => t.id === newTaskId)?.name}</span></div>
+                    <div>
+                      任务：
+                      <span className="font-medium">
+                        {newVerificationType === 'migration'
+                          ? migrationTaskList.find((t) => t.id === newTaskId)?.name
+                          : recoveryTaskList.find((t) => t.id === newTaskId)?.name}
+                      </span>
+                    </div>
                     <div>类型：<span className="font-medium">{newVerificationType === 'migration' ? '迁移校验' : '恢复校验'}</span></div>
                     <div>算法：<span className="font-medium">{algorithm}</span></div>
-                    <div>预计校验文件：<span className="font-mono font-medium">{tasks.find(t => t.id === newTaskId)?.totalFiles.toLocaleString() || '--'} 个</span></div>
+                    <div>
+                      预计校验文件：
+                      <span className="font-mono font-medium">
+                        {(newVerificationType === 'migration'
+                          ? migrationTaskList.find((t) => t.id === newTaskId)?.totalFiles
+                          : recoveryTaskList.find((t) => t.id === newTaskId)?.totalFiles
+                        )?.toLocaleString() || '--'} 个
+                      </span>
+                    </div>
                   </div>
                 </div>
               )}
@@ -1871,6 +2026,193 @@ function VerificationDetailsTable({ details }: { details: (VerificationDetail & 
           })}
         </tbody>
       </table>
+    </div>
+  );
+}
+
+interface RecoveryTaskDrawerProps {
+  open: boolean;
+  onClose: () => void;
+  onViewVerificationReport: (taskId: string) => void;
+}
+
+function RecoveryTaskDrawer({ open, onClose, onViewVerificationReport }: RecoveryTaskDrawerProps) {
+  const store = useAppStore();
+  const recoveryTasks = store.recoveryTasks;
+  const verificationResults = store.verificationResults;
+  const [copiedId, setCopiedId] = useState<string | null>(null);
+
+  const handleCopyId = async (id: string) => {
+    try {
+      await navigator.clipboard.writeText(id);
+      setCopiedId(id);
+      setTimeout(() => setCopiedId(null), 1500);
+    } catch (err) {
+      console.error('Failed to copy:', err);
+    }
+  };
+
+  const getStatusBadge = (status: string) => {
+    const config: Record<string, { label: string; className: string }> = {
+      pending: { label: '等待中', className: 'bg-slate-100 text-slate-700 border-slate-200' },
+      running: { label: '进行中', className: 'bg-sky-50 text-sky-700 border-sky-200' },
+      completed: { label: '已完成', className: 'bg-emerald-50 text-emerald-700 border-emerald-200' },
+      failed: { label: '失败', className: 'bg-rose-50 text-rose-700 border-rose-200' },
+      paused: { label: '已暂停', className: 'bg-amber-50 text-amber-700 border-amber-200' },
+    };
+    const cfg = config[status] || config.pending;
+    return (
+      <span className={cn(
+        'inline-flex items-center px-2 py-0.5 rounded-md text-[10px] font-semibold border',
+        cfg.className
+      )}>
+        {cfg.label}
+      </span>
+    );
+  };
+
+  return (
+    <div
+      className={cn(
+        'fixed inset-0 z-50 transition-all duration-300',
+        open ? 'pointer-events-auto' : 'pointer-events-none'
+      )}
+    >
+      <div
+        className={cn(
+          'absolute inset-0 bg-slate-900/50 backdrop-blur-sm transition-opacity duration-300',
+          open ? 'opacity-100' : 'opacity-0'
+        )}
+        onClick={onClose}
+      />
+      <div
+        className={cn(
+          'absolute top-0 right-0 h-full bg-white shadow-2xl transition-transform duration-300 ease-out flex flex-col',
+          open ? 'translate-x-0' : 'translate-x-full'
+        )}
+        style={{ width: '480px', maxWidth: '100vw' }}
+      >
+        <div className="px-5 py-4 border-b border-slate-100 flex items-center justify-between flex-shrink-0">
+          <h3 className="text-base font-bold text-slate-900 flex items-center gap-2">
+            <RotateCcw className="h-5 w-5 text-rose-600" />
+            恢复任务历史
+          </h3>
+          <button
+            onClick={onClose}
+            className="p-2 rounded-lg hover:bg-slate-100 text-slate-400 hover:text-slate-600 transition-all"
+          >
+            <X className="h-4 w-4" />
+          </button>
+        </div>
+
+        <div className="flex-1 overflow-y-auto p-4 space-y-3">
+          {recoveryTasks.length === 0 ? (
+            <div className="py-20 text-center">
+              <div className="inline-flex items-center justify-center w-16 h-16 rounded-2xl bg-slate-100 mb-4">
+                <List className="h-8 w-8 text-slate-400" />
+              </div>
+              <div className="text-sm font-medium text-slate-700">暂无恢复任务</div>
+              <div className="text-xs text-slate-400 mt-1">从上方执行恢复 Tab 创建恢复任务</div>
+            </div>
+          ) : (
+            recoveryTasks
+              .slice()
+              .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())
+              .map((task) => {
+                const version = store.backupVersions.find((v) => v.id === task.versionId);
+                const hasVerification = verificationResults.some((v) => v.taskId === task.id);
+                const isFullRecovery = !task.fileIds || task.fileIds.length === 0;
+                const selectedCount = task.fileIds?.length || 0;
+                return (
+                  <div
+                    key={task.id}
+                    className="bg-white rounded-xl border border-slate-200 p-4 space-y-3 hover:border-slate-300 transition-all"
+                  >
+                    <div className="flex items-start justify-between gap-2">
+                      <div className="flex items-center gap-2 min-w-0">
+                        <span className="font-mono text-xs text-slate-500 truncate" title={task.id}>
+                          {task.id}
+                        </span>
+                        <button
+                          onClick={() => handleCopyId(task.id)}
+                          className="text-slate-400 hover:text-primary-600 transition-colors flex-shrink-0"
+                          title="复制任务 ID"
+                        >
+                          {copiedId === task.id ? (
+                            <Check className="h-3 w-3 text-emerald-500" />
+                          ) : (
+                            <Copy className="h-3 w-3" />
+                          )}
+                        </button>
+                      </div>
+                      {getStatusBadge(task.status)}
+                    </div>
+
+                    <div className="flex flex-wrap items-center gap-2">
+                      {version && (
+                        <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[10px] font-semibold bg-sky-50 text-sky-700 border border-sky-200">
+                          {version.version}
+                        </span>
+                      )}
+                      <span className="text-xs text-slate-400">
+                        {formatDateTime(task.createdAt)}
+                      </span>
+                    </div>
+
+                    <div className="flex items-start gap-2">
+                      <Folder className="h-3.5 w-3.5 text-slate-400 mt-0.5 flex-shrink-0" />
+                      <span
+                        className="font-mono text-xs text-slate-600 break-all"
+                        title={task.targetPath}
+                      >
+                        {task.targetPath}
+                      </span>
+                    </div>
+
+                    <div>
+                      <div className="text-xs text-slate-600">
+                        <span className="font-medium text-slate-700">文件范围：</span>
+                        {isFullRecovery ? (
+                          <span>整版本恢复（{task.totalFiles} 个文件）</span>
+                        ) : (
+                          <span>选中 {selectedCount}/{task.totalFiles} 个文件</span>
+                        )}
+                      </div>
+                      {task.totalSize && (
+                        <div className="text-[11px] text-slate-400 mt-0.5">
+                          总大小：{task.totalSize}
+                        </div>
+                      )}
+                    </div>
+
+                    <div className="flex items-center justify-between pt-1 border-t border-slate-50">
+                      <span className="text-[11px] text-slate-400">
+                        创建：{formatDateTime(task.createdAt)}
+                      </span>
+                      <button
+                        onClick={() => {
+                          if (hasVerification) {
+                            onViewVerificationReport(task.id);
+                          }
+                        }}
+                        disabled={!hasVerification}
+                        className={cn(
+                          'inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-xs font-medium transition-all',
+                          hasVerification
+                            ? 'bg-primary-50 text-primary-700 hover:bg-primary-100 border border-primary-200'
+                            : 'bg-slate-50 text-slate-400 border border-slate-200 cursor-not-allowed'
+                        )}
+                      >
+                        <FileCheck className="h-3 w-3" />
+                        {hasVerification ? '查看校验报告' : '校验生成中...'}
+                      </button>
+                    </div>
+                  </div>
+                );
+              })
+          )}
+        </div>
+      </div>
     </div>
   );
 }

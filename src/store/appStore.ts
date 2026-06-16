@@ -68,6 +68,15 @@ interface TaskStatusUpdate {
   endTime?: string;
 }
 
+interface TaskFailedStats {
+  total: number;
+  pending: number;
+  processing: number;
+  resolved: number;
+  skipped: number;
+  retryable: number;
+}
+
 interface AppStore {
   dataSources: DataSource[];
   targetLocations: TargetLocation[];
@@ -86,6 +95,10 @@ interface AppStore {
   unreadCount: number;
   skippedFileIds: string[];
   newestCreatedTaskId: string | null;
+  selectedFailedFileIds: Record<string, string[]>;
+  processingFileIds: Record<string, string[]>;
+  resolvedFileIds: Record<string, string[]>;
+  skippedFileIdsByTask: Record<string, string[]>;
 
   addDataSource: (data: Omit<DataSource, 'id' | 'createdAt' | 'lastSync' | 'totalFiles' | 'totalSize' | 'status'>) => void;
   updateDataSource: (id: string, updates: Partial<DataSource>) => void;
@@ -105,7 +118,11 @@ interface AppStore {
   retryAllFailedFiles: (taskId: string) => void;
   batchRetryFailedFiles: (taskId: string, fileIds: string[]) => void;
   skipFailedFile: (fileId: string) => void;
-  batchSkipFiles: (fileIds: string[]) => void;
+  batchSkipFiles: (fileIds: string[], taskId?: string) => void;
+  toggleFailedFileSelected: (taskId: string, fileId: string) => void;
+  setFailedFilesSelected: (taskId: string, fileIds: string[]) => void;
+  clearFailedFilesSelection: (taskId: string) => void;
+  getTaskFailedStats: (taskId: string) => TaskFailedStats;
 
   toggleBackupSchedule: (scheduleId: string) => void;
   createBackupSchedule: (data: Partial<BackupSchedule> & { name: string; enabled?: boolean }) => void;
@@ -115,7 +132,7 @@ interface AppStore {
 
   performRecovery: (data: Omit<RecoveryTask, 'id' | 'status' | 'progress' | 'processedFiles' | 'processedSize' | 'createdAt' | 'createdBy'>) => void;
   performRecoveryAndVerify: (data: Omit<RecoveryTask, 'id' | 'status' | 'progress' | 'processedFiles' | 'processedSize' | 'createdAt' | 'createdBy'>) => string;
-  generateVerification: (data: { taskId: string; name: string; totalFiles: number; type?: 'migration' | 'recovery' }) => void;
+  generateVerification: (data: { taskId: string; name: string; totalFiles: number; type?: 'migration' | 'recovery' }) => string;
 
   markAsRead: (id: string) => void;
   markAllAsRead: () => void;
@@ -148,6 +165,10 @@ export const useAppStore = create<AppStore>((set, get) => ({
   unreadCount: initialNotifications.filter((n) => !n.read).length,
   skippedFileIds: [],
   newestCreatedTaskId: null,
+  selectedFailedFileIds: {},
+  processingFileIds: {},
+  resolvedFileIds: {},
+  skippedFileIdsByTask: {},
 
   addDataSource: (data) => {
     const newDs: DataSource = {
@@ -344,95 +365,299 @@ export const useAppStore = create<AppStore>((set, get) => ({
   retryFailedFile: (fileId) => {
     const file = get().failedFiles.find((f) => f.id === fileId);
     if (!file) return;
+    const taskId = file.taskId;
+
     set((s) => ({
+      processingFileIds: {
+        ...s.processingFileIds,
+        [taskId]: [...(s.processingFileIds[taskId] ?? []), fileId],
+      },
       failedFiles: s.failedFiles.map((f) =>
         f.id === fileId
-          ? { ...f, retryCount: f.retryCount + 1, failedAt: getNow() }
+          ? { ...f, processingStatus: 'processing' as const }
           : f
-      )
+      ),
     }));
-    get().addAuditLog({
-      action: '重试失败文件',
-      actionType: 'execute',
-      level: 'info',
-      target: file.taskId,
-      targetType: 'migration_task',
-      details: `重试失败文件：${file.fileName}`
-    });
+
+    const delay = 1500 + Math.random() * 1500;
+    setTimeout(() => {
+      const success = Math.random() < 0.8;
+      const now = getNow();
+      const newRetryCount = file.retryCount + 1;
+      const resultNote = success
+        ? `第${newRetryCount}次重试成功`
+        : `第${newRetryCount}次重试失败`;
+
+      set((s) => {
+        const taskProcessingIds = (s.processingFileIds[taskId] ?? []).filter((id) => id !== fileId);
+        const taskResolvedIds = success
+          ? [...(s.resolvedFileIds[taskId] ?? []), fileId]
+          : s.resolvedFileIds[taskId] ?? [];
+
+        return {
+          processingFileIds: {
+            ...s.processingFileIds,
+            [taskId]: taskProcessingIds,
+          },
+          resolvedFileIds: {
+            ...s.resolvedFileIds,
+            [taskId]: taskResolvedIds,
+          },
+          failedFiles: s.failedFiles.map((f) =>
+            f.id === fileId
+              ? {
+                  ...f,
+                  retryCount: newRetryCount,
+                  processingStatus: success ? ('resolved' as const) : ('failed' as const),
+                  resolvedAt: success ? now : undefined,
+                  resolutionNote: resultNote,
+                }
+              : f
+          ),
+        };
+      });
+
+      get().addAuditLog({
+        action: '重试失败文件',
+        actionType: 'execute',
+        level: success ? 'success' : 'error',
+        target: taskId,
+        targetType: 'migration_task',
+        details: `重试失败文件：${file.fileName}，结果：${resultNote}`,
+      });
+    }, delay);
   },
 
   retryAllFailedFiles: (taskId) => {
-    const count = get().failedFiles.filter((f) => f.taskId === taskId && f.canRetry).length;
-    set((s) => ({
-      failedFiles: s.failedFiles.map((f) =>
-        f.taskId === taskId && f.canRetry
-          ? { ...f, retryCount: f.retryCount + 1, failedAt: getNow() }
-          : f
+    const stats = get().getTaskFailedStats(taskId);
+    const ids = get().failedFiles
+      .filter((f) =>
+        f.taskId === taskId &&
+        f.canRetry &&
+        f.processingStatus !== 'resolved' &&
+        f.processingStatus !== 'skipped'
       )
-    }));
-    get().addAuditLog({
-      action: '重试所有失败文件',
-      actionType: 'execute',
-      level: 'info',
-      target: taskId,
-      targetType: 'migration_task',
-      details: `重试所有${count}个可重试失败文件`
-    });
+      .map((f) => f.id);
+    if (ids.length > 0) {
+      get().batchRetryFailedFiles(taskId, ids);
+    }
   },
 
   batchRetryFailedFiles: (taskId, fileIds) => {
-    const validFiles = get().failedFiles.filter((f) => fileIds.includes(f.id) && f.canRetry);
-    const count = validFiles.length;
+    const validFiles = get().failedFiles.filter(
+      (f) => fileIds.includes(f.id) && f.canRetry && f.processingStatus !== 'processing'
+    );
+    const validIds = validFiles.map((f) => f.id);
+    if (validIds.length === 0) return;
+
     set((s) => ({
+      processingFileIds: {
+        ...s.processingFileIds,
+        [taskId]: [...new Set([...(s.processingFileIds[taskId] ?? []), ...validIds])],
+      },
       failedFiles: s.failedFiles.map((f) =>
-        fileIds.includes(f.id) && f.canRetry
-          ? { ...f, retryCount: f.retryCount + 1, failedAt: getNow() }
+        validIds.includes(f.id)
+          ? { ...f, processingStatus: 'processing' as const }
           : f
-      )
+      ),
     }));
-    get().addAuditLog({
-      action: '批量重试选中文件',
-      actionType: 'execute',
-      level: 'info',
-      target: taskId,
-      targetType: 'migration_task',
-      details: `批量重试${count}个选中的可重试失败文件`
+
+    let successCount = 0;
+    let failCount = 0;
+    let processedCount = 0;
+    const total = validIds.length;
+
+    validFiles.forEach((file) => {
+      const staggerDelay = Math.random() * 1000;
+      const processDelay = 1500 + Math.random() * 1500;
+
+      setTimeout(() => {
+        const success = Math.random() < 0.8;
+        const now = getNow();
+        const newRetryCount = file.retryCount + 1;
+        const resultNote = success
+          ? `第${newRetryCount}次重试成功`
+          : `第${newRetryCount}次重试失败`;
+
+        set((s) => {
+          const taskProcessingIds = (s.processingFileIds[taskId] ?? []).filter((id) => id !== file.id);
+          const taskResolvedIds = success
+            ? [...new Set([...(s.resolvedFileIds[taskId] ?? []), file.id])]
+            : s.resolvedFileIds[taskId] ?? [];
+
+          return {
+            processingFileIds: {
+              ...s.processingFileIds,
+              [taskId]: taskProcessingIds,
+            },
+            resolvedFileIds: {
+              ...s.resolvedFileIds,
+              [taskId]: taskResolvedIds,
+            },
+            failedFiles: s.failedFiles.map((f) =>
+              f.id === file.id
+                ? {
+                    ...f,
+                    retryCount: newRetryCount,
+                    processingStatus: success ? ('resolved' as const) : ('failed' as const),
+                    resolvedAt: success ? now : undefined,
+                    resolutionNote: resultNote,
+                  }
+                : f
+            ),
+          };
+        });
+
+        if (success) successCount++;
+        else failCount++;
+        processedCount++;
+
+        if (processedCount === total) {
+          get().addAuditLog({
+            action: '批量重试文件',
+            actionType: 'execute',
+            level: failCount === 0 ? 'success' : (successCount === 0 ? 'error' : 'warning'),
+            target: taskId,
+            targetType: 'migration_task',
+            details: `共${total}个：成功${successCount}个，失败${failCount}个`,
+          });
+          get().clearFailedFilesSelection(taskId);
+        }
+      }, staggerDelay + processDelay);
     });
   },
 
   skipFailedFile: (fileId) => {
     const file = get().failedFiles.find((f) => f.id === fileId);
+    if (!file) return;
+    const taskId = file.taskId;
+    const now = getNow();
+
     set((s) => ({
       skippedFileIds: s.skippedFileIds.includes(fileId)
         ? s.skippedFileIds
-        : [...s.skippedFileIds, fileId]
+        : [...s.skippedFileIds, fileId],
+      skippedFileIdsByTask: {
+        ...s.skippedFileIdsByTask,
+        [taskId]: [...new Set([...(s.skippedFileIdsByTask[taskId] ?? []), fileId])],
+      },
+      failedFiles: s.failedFiles.map((f) =>
+        f.id === fileId
+          ? {
+              ...f,
+              processingStatus: 'skipped' as const,
+              resolvedAt: now,
+              resolutionNote: '手动跳过',
+            }
+          : f
+      ),
     }));
     get().addAuditLog({
       action: '跳过失败文件',
       actionType: 'update',
       level: 'warning',
-      target: file?.taskId ?? 'unknown',
+      target: taskId,
       targetType: 'migration_task',
-      details: `跳过失败文件：${file?.fileName ?? fileId}`
+      details: `跳过失败文件：${file.fileName}`,
     });
   },
 
-  batchSkipFiles: (fileIds) => {
+  batchSkipFiles: (fileIds, taskId?) => {
     const files = get().failedFiles.filter((f) => fileIds.includes(f.id));
-    const taskId = files[0]?.taskId ?? 'unknown';
+    if (files.length === 0) return;
+    const resolvedTaskId = taskId ?? files[0]?.taskId ?? 'unknown';
+    const now = getNow();
+
     set((s) => {
       const existing = new Set(s.skippedFileIds);
       const toAdd = fileIds.filter((id) => !existing.has(id));
-      return { skippedFileIds: [...s.skippedFileIds, ...toAdd] };
+
+      const taskSkippedMap: Record<string, string[]> = { ...s.skippedFileIdsByTask };
+      files.forEach((f) => {
+        const tId = f.taskId;
+        taskSkippedMap[tId] = [...new Set([...(taskSkippedMap[tId] ?? []), f.id])];
+      });
+
+      return {
+        skippedFileIds: [...s.skippedFileIds, ...toAdd],
+        skippedFileIdsByTask: taskSkippedMap,
+        failedFiles: s.failedFiles.map((f) =>
+          fileIds.includes(f.id)
+            ? {
+                ...f,
+                processingStatus: 'skipped' as const,
+                resolvedAt: now,
+                resolutionNote: '手动跳过',
+              }
+            : f
+        ),
+      };
     });
     get().addAuditLog({
       action: '批量跳过文件',
       actionType: 'update',
       level: 'warning',
-      target: taskId,
+      target: resolvedTaskId,
       targetType: 'migration_task',
-      details: `批量跳过${fileIds.length}个文件`
+      details: `共${fileIds.length}个文件被跳过`,
     });
+    if (taskId) {
+      get().clearFailedFilesSelection(taskId);
+    }
+  },
+
+  toggleFailedFileSelected: (taskId, fileId) => {
+    set((s) => {
+      const current = s.selectedFailedFileIds[taskId] ?? [];
+      const next = current.includes(fileId)
+        ? current.filter((id) => id !== fileId)
+        : [...current, fileId];
+      return {
+        selectedFailedFileIds: {
+          ...s.selectedFailedFileIds,
+          [taskId]: next,
+        },
+      };
+    });
+  },
+
+  setFailedFilesSelected: (taskId, fileIds) => {
+    set((s) => ({
+      selectedFailedFileIds: {
+        ...s.selectedFailedFileIds,
+        [taskId]: fileIds,
+      },
+    }));
+  },
+
+  clearFailedFilesSelection: (taskId) => {
+    set((s) => ({
+      selectedFailedFileIds: {
+        ...s.selectedFailedFileIds,
+        [taskId]: [],
+      },
+    }));
+  },
+
+  getTaskFailedStats: (taskId) => {
+    const taskFiles = get().failedFiles.filter((f) => f.taskId === taskId);
+    return {
+      total: taskFiles.length,
+      pending: taskFiles.filter(
+        (f) =>
+          f.processingStatus === 'pending' || f.processingStatus === 'failed'
+      ).length,
+      processing: taskFiles.filter((f) => f.processingStatus === 'processing').length,
+      resolved: taskFiles.filter((f) => f.processingStatus === 'resolved').length,
+      skipped: taskFiles.filter((f) => f.processingStatus === 'skipped').length,
+      retryable: taskFiles.filter(
+        (f) =>
+          f.canRetry &&
+          f.processingStatus !== 'resolved' &&
+          f.processingStatus !== 'skipped' &&
+          f.processingStatus !== 'processing'
+      ).length,
+    };
   },
 
   toggleBackupSchedule: (scheduleId) => {
@@ -565,6 +790,7 @@ export const useAppStore = create<AppStore>((set, get) => ({
                  get().recoveryTasks.find((t) => t.id === data.taskId);
     const passed = Math.floor(data.totalFiles * 0.98);
     const failed = Math.max(0, data.totalFiles - passed);
+    const verificationType: 'migration' | 'recovery' = data.type !== undefined ? data.type : 'migration';
     const newVerification: VerificationResult = {
       id: generateId('vr'),
       taskId: data.taskId,
@@ -577,10 +803,10 @@ export const useAppStore = create<AppStore>((set, get) => ({
       startTime: getNow(),
       endTime: getNow(),
       details: [],
-      type: data.type || 'migration'
+      type: verificationType
     };
     set((s) => ({ verificationResults: [...s.verificationResults, newVerification] }));
-    const typeLabel = data.type === 'recovery' ? '恢复数据校验' : '数据完整性校验';
+    const typeLabel = verificationType === 'recovery' ? '恢复数据校验' : '数据完整性校验';
     get().addAuditLog({
       action: failed === 0 ? `${typeLabel}通过` : `${typeLabel}发现异常`,
       actionType: 'execute',
@@ -607,6 +833,7 @@ export const useAppStore = create<AppStore>((set, get) => ({
         unreadCount: s.unreadCount + 1
       }));
     }
+    return newVerification.id;
   },
 
   markAsRead: (id) => {

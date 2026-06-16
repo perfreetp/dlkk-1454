@@ -20,6 +20,9 @@ import {
   SkipForward,
   Search,
   FileQuestion,
+  Loader2,
+  Check,
+  X,
 } from 'lucide-react';
 import ProgressBar from '@/components/common/ProgressBar';
 import StatusBadge from '@/components/common/StatusBadge';
@@ -108,6 +111,7 @@ export default function MigrationExecution() {
     targetLocations,
     selectedTaskId: storeSelectedTaskId,
     skippedFileIds,
+    selectedFailedFileIds,
     setSelectedTaskId,
     retryFailedFile,
     retryAllFailedFiles,
@@ -115,6 +119,9 @@ export default function MigrationExecution() {
     skipFailedFile,
     batchSkipFiles,
     updateTaskStatus,
+    toggleFailedFileSelected,
+    clearFailedFilesSelection,
+    getTaskFailedStats,
   } = useAppStore();
 
   const initialTaskId = storeSelectedTaskId || migrationTasks[0]?.id || 'mt-002';
@@ -122,7 +129,8 @@ export default function MigrationExecution() {
   const [failedTab, setFailedTab] = useState<FailedTab>('all');
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [currentSpeed, setCurrentSpeed] = useState(12.5);
-  const [selectedFailedRows, setSelectedFailedRows] = useState<Set<number>>(new Set());
+  const [toast, setToast] = useState<{ message: string; type: 'success' | 'info' | 'warning' } | null>(null);
+  const [batchRetryLoading, setBatchRetryLoading] = useState(false);
 
   useEffect(() => {
     if (storeSelectedTaskId && storeSelectedTaskId !== selectedTaskId) {
@@ -130,10 +138,21 @@ export default function MigrationExecution() {
     }
   }, [storeSelectedTaskId]);
 
+  const showToast = (message: string, type: 'success' | 'info' | 'warning' = 'info') => {
+    setToast({ message, type });
+  };
+
+  useEffect(() => {
+    if (toast) {
+      const t = setTimeout(() => setToast(null), 3000);
+      return () => clearTimeout(t);
+    }
+  }, [toast]);
+
   const handleTaskChange = (taskId: string) => {
     setLocalSelectedTaskId(taskId);
     setSelectedTaskId(taskId);
-    setSelectedFailedRows(new Set());
+    clearFailedFilesSelection(taskId);
   };
 
   const currentTask = useMemo<MigrationTask | null>(() => {
@@ -156,10 +175,8 @@ export default function MigrationExecution() {
 
   const taskFailedFiles = useMemo<FailedFile[]>(() => {
     if (!currentTask) return [];
-    return failedFiles.filter(
-      (f) => f.taskId === currentTask.id && !skippedFileIds.includes(f.id)
-    );
-  }, [currentTask, failedFiles, skippedFileIds]);
+    return failedFiles.filter((f) => f.taskId === currentTask.id);
+  }, [currentTask, failedFiles]);
 
   const filteredFailedFiles = useMemo(() => {
     if (failedTab === 'all') return taskFailedFiles;
@@ -168,6 +185,41 @@ export default function MigrationExecution() {
     }
     return taskFailedFiles.filter((f) => f.errorType === failedTab);
   }, [taskFailedFiles, failedTab]);
+
+  const failedStats = useMemo(() => {
+    if (!currentTask) return { total: 0, pending: 0, processing: 0, resolved: 0, skipped: 0, retryable: 0 };
+    return getTaskFailedStats(currentTask.id);
+  }, [currentTask, getTaskFailedStats, failedFiles]);
+
+  const selectedIds = useMemo<Set<string>>(() => {
+    if (!currentTask) return new Set();
+    return new Set(selectedFailedFileIds[currentTask.id] ?? []);
+  }, [currentTask, selectedFailedFileIds]);
+
+  const selectableFilteredFiles = useMemo(() => {
+    return filteredFailedFiles.filter((f) => {
+      const s = f.processingStatus;
+      return s !== 'resolved' && s !== 'skipped';
+    });
+  }, [filteredFailedFiles]);
+
+  const allSelectableChecked = useMemo(() => {
+    if (selectableFilteredFiles.length === 0) return false;
+    return selectableFilteredFiles.every((f) => selectedIds.has(f.id));
+  }, [selectableFilteredFiles, selectedIds]);
+
+  const handleToggleAll = () => {
+    if (!currentTask) return;
+    if (allSelectableChecked) {
+      selectableFilteredFiles.forEach((f) => {
+        if (selectedIds.has(f.id)) toggleFailedFileSelected(currentTask.id, f.id);
+      });
+    } else {
+      selectableFilteredFiles.forEach((f) => {
+        if (!selectedIds.has(f.id)) toggleFailedFileSelected(currentTask.id, f.id);
+      });
+    }
+  };
 
   const categoryProgress = useMemo<CategoryProgress[]>(() => {
     if (!currentTask) return CATEGORY_PROGRESS_TEMPLATE;
@@ -181,10 +233,7 @@ export default function MigrationExecution() {
     }));
   }, [currentTask]);
 
-  const retryableCount = useMemo(
-    () => taskFailedFiles.filter((f) => f.canRetry).length,
-    [taskFailedFiles]
-  );
+  const retryableCount = failedStats.retryable;
 
   useEffect(() => {
     if (currentTask?.status !== 'running') return;
@@ -199,21 +248,20 @@ export default function MigrationExecution() {
   }, [currentTask?.status]);
 
   const batchRetrySelected = () => {
-    const fileIds = Array.from(selectedFailedRows)
-      .map((idx) => filteredFailedFiles[idx]?.id)
-      .filter(Boolean) as string[];
+    const fileIds = Array.from(selectedIds);
     if (fileIds.length > 0 && selectedTaskId) {
+      setBatchRetryLoading(true);
       batchRetryFailedFiles(selectedTaskId, fileIds);
+      showToast(`已发起 ${fileIds.length} 个文件重试，日志已记录`, 'success');
+      setTimeout(() => setBatchRetryLoading(false), 2200);
     }
   };
 
   const batchSkipSelected = () => {
-    const fileIds = Array.from(selectedFailedRows)
-      .map((idx) => filteredFailedFiles[idx]?.id)
-      .filter(Boolean) as string[];
-    if (fileIds.length > 0) {
-      batchSkipFiles(fileIds);
-      setSelectedFailedRows(new Set());
+    const fileIds = Array.from(selectedIds);
+    if (fileIds.length > 0 && selectedTaskId) {
+      batchSkipFiles(fileIds, selectedTaskId);
+      showToast(`已跳过 ${fileIds.length} 个文件`, 'warning');
     }
   };
 
@@ -229,51 +277,101 @@ export default function MigrationExecution() {
   const isEnded = ['completed', 'failed', 'cancelled'].includes(currentTask?.status ?? '');
 
   const completed = currentTask?.completedFiles ?? 0;
-  const failed = taskFailedFiles.length;
-  const skipped = skippedFileIds.length;
-  const remaining = (currentTask?.totalFiles ?? 0) - completed - failed;
+  const failed = failedStats.pending + failedStats.processing;
+  const skipped = failedStats.skipped;
+  const remaining = (currentTask?.totalFiles ?? 0) - completed - failedStats.resolved - failedStats.skipped;
 
   const totalBytes = parseSizeToBytes(currentTask?.totalSize ?? '0 B');
   const transferredBytes = parseSizeToBytes(currentTask?.transferredSize ?? '0 B');
   const avgSpeed = 10.8;
   const peakSpeed = 14.6;
 
+  const processingStatusConfig: Record<string, { label: string; className: string; icon?: React.ComponentType<{ className?: string }> }> = {
+    pending: { label: '待处理', className: 'bg-slate-100 text-slate-600 border-slate-200' },
+    failed: { label: '待处理', className: 'bg-slate-100 text-slate-600 border-slate-200' },
+    processing: { label: '处理中', className: 'bg-sky-100 text-sky-700 border-sky-200', icon: Loader2 },
+    resolved: { label: '已处理', className: 'bg-emerald-100 text-emerald-700 border-emerald-200', icon: Check },
+    skipped: { label: '已跳过', className: 'bg-amber-100 text-amber-700 border-amber-200', icon: SkipForward },
+  };
+
   const failedColumns: ColumnDef<FailedFile>[] = [
     {
       id: 'select',
-      header: '',
-      width: '40px',
-      cell: (_, index) => (
+      header: (
         <input
           type="checkbox"
-          checked={selectedFailedRows.has(index)}
-          onChange={() => {
-            setSelectedFailedRows((prev) => {
-              const next = new Set(prev);
-              if (next.has(index)) next.delete(index);
-              else next.add(index);
-              return next;
-            });
-          }}
+          checked={allSelectableChecked}
+          onChange={handleToggleAll}
           onClick={(e) => e.stopPropagation()}
-          className="w-4 h-4 rounded border-slate-300 text-primary-600 focus:ring-primary-500"
+          disabled={selectableFilteredFiles.length === 0}
+          className="w-4 h-4 rounded border-slate-300 text-primary-600 focus:ring-primary-500 disabled:opacity-40"
+          title={selectableFilteredFiles.length === 0 ? '暂无可选中文件' : allSelectableChecked ? '取消全选待处理文件' : '全选待处理文件'}
         />
       ),
+      width: '40px',
+      cell: (row) => {
+        const isResolved = row.processingStatus === 'resolved' || row.processingStatus === 'skipped';
+        return (
+          <input
+            type="checkbox"
+            checked={selectedIds.has(row.id)}
+            disabled={isResolved}
+            onChange={() => currentTask && !isResolved && toggleFailedFileSelected(currentTask.id, row.id)}
+            onClick={(e) => e.stopPropagation()}
+            className={cn(
+              'w-4 h-4 rounded border-slate-300 text-primary-600 focus:ring-primary-500',
+              isResolved && 'opacity-30 cursor-not-allowed'
+            )}
+          />
+        );
+      },
+    },
+    {
+      id: 'processingStatus',
+      header: '处理状态',
+      accessorKey: 'processingStatus' as keyof FailedFile,
+      sortable: true,
+      width: '110px',
+      cell: (row) => {
+        const status = row.processingStatus || 'pending';
+        const cfg = processingStatusConfig[status] ?? processingStatusConfig.pending;
+        const StatusIcon = cfg.icon;
+        return (
+          <span
+            className={cn(
+              'inline-flex items-center gap-1 px-2 py-1 rounded-full text-xs font-medium border',
+              cfg.className
+            )}
+          >
+            {StatusIcon && <StatusIcon className={cn('h-3 w-3', status === 'processing' && 'animate-spin')} />}
+            {cfg.label}
+          </span>
+        );
+      },
     },
     {
       id: 'fileName',
       header: '文件名',
       accessorKey: 'fileName' as keyof FailedFile,
       sortable: true,
-      cell: (row) => (
-        <div className="group relative">
-          <div className="font-medium text-slate-800 truncate max-w-xs">{row.fileName}</div>
-          <div className="text-xs text-slate-400 truncate max-w-xs">{row.filePath}</div>
-          <div className="absolute z-20 left-0 top-full mt-1 px-3 py-2 bg-slate-800 text-white text-xs rounded-lg opacity-0 invisible group-hover:opacity-100 group-hover:visible transition-all whitespace-nowrap shadow-xl pointer-events-none">
-            {row.filePath}
+      cell: (row) => {
+        const isProcessing = row.processingStatus === 'processing';
+        const isResolved = row.processingStatus === 'resolved' || row.processingStatus === 'skipped';
+        return (
+          <div className="group relative">
+            <div className={cn('flex items-center gap-1.5', isResolved && 'text-slate-400')}>
+              <div className={cn('font-medium truncate max-w-xs', !isResolved ? 'text-slate-800' : 'line-through')}>
+                {row.fileName}
+              </div>
+              {isProcessing && <Loader2 className="h-3.5 w-3.5 text-sky-500 animate-spin flex-shrink-0" />}
+            </div>
+            <div className="text-xs text-slate-400 truncate max-w-xs">{row.filePath}</div>
+            <div className="absolute z-20 left-0 top-full mt-1 px-3 py-2 bg-slate-800 text-white text-xs rounded-lg opacity-0 invisible group-hover:opacity-100 group-hover:visible transition-all whitespace-nowrap shadow-xl pointer-events-none">
+              {row.filePath}
+            </div>
           </div>
-        </div>
-      ),
+        );
+      },
     },
     {
       id: 'size',
@@ -344,43 +442,60 @@ export default function MigrationExecution() {
       header: '操作',
       width: '200px',
       align: 'right',
-      cell: (row) => (
-        <div className="flex items-center justify-end gap-1">
-          <button
-            onClick={(e) => {
-              e.stopPropagation();
-              if (row.canRetry) retryFailedFile(row.id);
-            }}
-            disabled={!row.canRetry}
-            className={cn(
-              'inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-xs font-medium transition-all',
-              row.canRetry
-                ? 'text-primary-600 bg-primary-50 hover:bg-primary-100 hover:shadow-sm'
-                : 'text-slate-400 bg-slate-50 cursor-not-allowed'
-            )}
-          >
-            <RefreshCw className={cn('h-3.5 w-3.5', row.canRetry && 'animate-spin-slow')} />
-            重试
-          </button>
-          <button
-            onClick={(e) => e.stopPropagation()}
-            className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-xs font-medium text-slate-600 bg-slate-50 hover:bg-slate-100 hover:shadow-sm transition-all"
-          >
-            <Eye className="h-3.5 w-3.5" />
-            详情
-          </button>
-          <button
-            onClick={(e) => {
-              e.stopPropagation();
-              skipFailedFile(row.id);
-            }}
-            className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-xs font-medium text-amber-600 bg-amber-50 hover:bg-amber-100 hover:shadow-sm transition-all"
-          >
-            <SkipForward className="h-3.5 w-3.5" />
-            跳过
-          </button>
-        </div>
-      ),
+      cell: (row) => {
+        const isResolved = row.processingStatus === 'resolved' || row.processingStatus === 'skipped';
+        const isProcessing = row.processingStatus === 'processing';
+        const canRetryNow = row.canRetry && !isResolved && !isProcessing;
+        return (
+          <div className="flex items-center justify-end gap-1">
+            <button
+              onClick={(e) => {
+                e.stopPropagation();
+                if (canRetryNow) retryFailedFile(row.id);
+              }}
+              disabled={!canRetryNow}
+              className={cn(
+                'inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-xs font-medium transition-all',
+                canRetryNow
+                  ? 'text-primary-600 bg-primary-50 hover:bg-primary-100 hover:shadow-sm'
+                  : 'text-slate-400 bg-slate-50 cursor-not-allowed'
+              )}
+            >
+              <RefreshCw className={cn('h-3.5 w-3.5', isProcessing && 'animate-spin')} />
+              重试
+            </button>
+            <button
+              onClick={(e) => e.stopPropagation()}
+              className={cn(
+                'inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-xs font-medium transition-all',
+                !isResolved
+                  ? 'text-slate-600 bg-slate-50 hover:bg-slate-100 hover:shadow-sm'
+                  : 'text-slate-400 bg-slate-50 cursor-not-allowed'
+              )}
+              disabled={isResolved}
+            >
+              <Eye className="h-3.5 w-3.5" />
+              详情
+            </button>
+            <button
+              onClick={(e) => {
+                e.stopPropagation();
+                if (!isResolved) skipFailedFile(row.id);
+              }}
+              disabled={isResolved}
+              className={cn(
+                'inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-xs font-medium transition-all',
+                !isResolved
+                  ? 'text-amber-600 bg-amber-50 hover:bg-amber-100 hover:shadow-sm'
+                  : 'text-slate-400 bg-slate-50 cursor-not-allowed'
+              )}
+            >
+              <SkipForward className="h-3.5 w-3.5" />
+              跳过
+            </button>
+          </div>
+        );
+      },
     },
   ];
 
@@ -740,18 +855,8 @@ export default function MigrationExecution() {
                 <div className="flex flex-wrap items-center justify-between gap-3 mb-4">
                   <h2 className="text-sm font-semibold text-slate-800 flex items-center gap-2">
                     <XCircle className="h-4 w-4 text-rose-500" />
-                    失败文件列表
+                    失败文件处理工单台
                   </h2>
-                  <div className="flex items-center gap-2 text-xs text-slate-500">
-                    <span className="inline-flex items-center gap-1">
-                      <span className="w-2 h-2 rounded-full bg-rose-500" />
-                      共失败 <strong className="text-slate-700">{taskFailedFiles.length}</strong> 个
-                    </span>
-                    <span className="text-slate-300">|</span>
-                    <span>可重试 <strong className="text-emerald-600">{retryableCount}</strong> 个</span>
-                    <span className="text-slate-300">|</span>
-                    <span>已跳过 <strong className="text-amber-600">{skipped}</strong> 个</span>
-                  </div>
                 </div>
 
                 <div className="flex flex-wrap gap-1.5">
@@ -787,34 +892,62 @@ export default function MigrationExecution() {
                 </div>
               </div>
 
-              <div className="px-6 py-3 border-b border-slate-100 bg-slate-50/60 flex flex-wrap items-center gap-2">
+              <div className="px-6 py-3 border-b border-slate-100 bg-slate-50/60 flex flex-wrap items-center gap-x-2 gap-y-1.5">
+                <div className="flex flex-wrap items-center gap-1.5 text-xs">
+                  <span className="text-slate-500">
+                    共 <strong className="text-slate-700 font-semibold">{failedStats.total}</strong> 个
+                  </span>
+                  <span className="text-slate-300">｜</span>
+                  <span className="inline-flex items-center gap-1 text-slate-500">
+                    待处理 <strong className="text-slate-700 font-semibold">{failedStats.pending}</strong>
+                  </span>
+                  <span className="text-slate-300">｜</span>
+                  <span className="inline-flex items-center gap-1">
+                    <span className="inline-flex items-center px-1.5 py-0.5 rounded-md text-[10px] font-medium bg-sky-100 text-sky-700 border border-sky-200">
+                      处理中 <strong>{failedStats.processing}</strong>
+                    </span>
+                  </span>
+                  <span className="text-slate-300">｜</span>
+                  <span className="inline-flex items-center gap-1">
+                    <span className="inline-flex items-center px-1.5 py-0.5 rounded-md text-[10px] font-medium bg-emerald-100 text-emerald-700 border border-emerald-200">
+                      已处理 <strong>{failedStats.resolved}</strong>
+                    </span>
+                  </span>
+                  <span className="text-slate-300">｜</span>
+                  <span className="inline-flex items-center gap-1">
+                    <span className="inline-flex items-center px-1.5 py-0.5 rounded-md text-[10px] font-medium bg-amber-100 text-amber-700 border border-amber-200">
+                      已跳过 <strong>{failedStats.skipped}</strong>
+                    </span>
+                  </span>
+                  <span className="text-slate-300">｜</span>
+                  <span className="text-slate-500">
+                    可重试 <strong className="text-emerald-600 font-semibold">{failedStats.retryable}</strong>
+                  </span>
+                </div>
+                <span className="text-xs text-slate-400 mx-1">|</span>
                 <span className="text-xs text-slate-500">
-                  共失败 <strong className="text-slate-700">{taskFailedFiles.length}</strong> 个 · 可重试 <strong className="text-emerald-600">{retryableCount}</strong> 个 · 已跳过 <strong className="text-amber-600">{skipped}</strong> 个
-                </span>
-                <span className="text-xs text-slate-400 mx-2">|</span>
-                <span className="text-xs text-slate-500">
-                  已选中 <strong className="text-slate-700">{selectedFailedRows.size}</strong> 项
+                  已选中 <strong className="text-slate-700 font-semibold">{selectedIds.size}</strong> 项
                 </span>
                 <div className="flex-1" />
                 <button
                   onClick={batchRetrySelected}
-                  disabled={selectedFailedRows.size === 0}
+                  disabled={selectedIds.size === 0 || batchRetryLoading}
                   className={cn(
                     'inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium transition-all',
-                    selectedFailedRows.size > 0
+                    selectedIds.size > 0 && !batchRetryLoading
                       ? 'bg-primary-600 text-white hover:bg-primary-700 shadow-sm shadow-primary-500/20'
                       : 'bg-slate-100 text-slate-400 cursor-not-allowed'
                   )}
                 >
-                  <RefreshCw className="h-3.5 w-3.5" />
-                  批量重试选中
+                  <RefreshCw className={cn('h-3.5 w-3.5', batchRetryLoading && 'animate-spin')} />
+                  {batchRetryLoading ? '重试中...' : '批量重试选中'}
                 </button>
                 <button
                   onClick={batchSkipSelected}
-                  disabled={selectedFailedRows.size === 0}
+                  disabled={selectedIds.size === 0}
                   className={cn(
                     'inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium transition-all',
-                    selectedFailedRows.size > 0
+                    selectedIds.size > 0
                       ? 'bg-amber-500 text-white hover:bg-amber-600 shadow-sm shadow-amber-500/20'
                       : 'bg-slate-100 text-slate-400 cursor-not-allowed'
                   )}
@@ -824,10 +957,10 @@ export default function MigrationExecution() {
                 </button>
                 <button
                   onClick={() => retryAllFailedFiles(selectedTaskId)}
-                  disabled={retryableCount === 0}
+                  disabled={failedStats.retryable === 0}
                   className={cn(
                     'inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium transition-all',
-                    retryableCount > 0
+                    failedStats.retryable > 0
                       ? 'bg-emerald-500 text-white hover:bg-emerald-600 shadow-sm shadow-emerald-500/20'
                       : 'bg-slate-100 text-slate-400 cursor-not-allowed'
                   )}
@@ -836,11 +969,11 @@ export default function MigrationExecution() {
                   重试全部可重试
                 </button>
                 <button
-                  onClick={() => setSelectedFailedRows(new Set())}
-                  disabled={selectedFailedRows.size === 0}
+                  onClick={() => clearFailedFilesSelection(selectedTaskId)}
+                  disabled={selectedIds.size === 0}
                   className={cn(
                     'inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium transition-all border',
-                    selectedFailedRows.size > 0
+                    selectedIds.size > 0
                       ? 'bg-white border-slate-200 text-slate-600 hover:bg-slate-50'
                       : 'bg-slate-50 border-slate-100 text-slate-400 cursor-not-allowed'
                   )}
@@ -855,6 +988,13 @@ export default function MigrationExecution() {
                   data={filteredFailedFiles}
                   selectable={false}
                   emptyMessage="当前分类下暂无失败文件"
+                  getRowClassName={(row: FailedFile) => {
+                    const s = row.processingStatus;
+                    if (s === 'resolved' || s === 'skipped') {
+                      return 'bg-slate-50/80 opacity-80 hover:!bg-slate-100/80';
+                    }
+                    return undefined;
+                  }}
                 />
               </div>
             </div>
@@ -922,6 +1062,24 @@ export default function MigrationExecution() {
           )}
         </div>
       </div>
+
+      {toast && (
+        <div className="fixed bottom-6 left-1/2 -translate-x-1/2 z-50 animate-[fadeIn_0.2s_ease-out]">
+          <div
+            className={cn(
+              'inline-flex items-center gap-2 px-5 py-3 rounded-xl shadow-lg shadow-black/10 border text-sm font-medium',
+              toast.type === 'success' && 'bg-emerald-50 border-emerald-200 text-emerald-700',
+              toast.type === 'warning' && 'bg-amber-50 border-amber-200 text-amber-700',
+              toast.type === 'info' && 'bg-sky-50 border-sky-200 text-sky-700'
+            )}
+          >
+            {toast.type === 'success' && <Check className="h-4 w-4" />}
+            {toast.type === 'warning' && <SkipForward className="h-4 w-4" />}
+            {toast.type === 'info' && <Activity className="h-4 w-4" />}
+            {toast.message}
+          </div>
+        </div>
+      )}
     </div>
   );
 }

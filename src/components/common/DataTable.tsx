@@ -7,7 +7,7 @@ import { cn } from '@/lib/utils';
 
 export interface ColumnDef<T = any> {
   id: string;
-  header: string;
+  header: React.ReactNode;
   accessorKey?: keyof T;
   cell?: (row: T, index: number) => React.ReactNode;
   sortable?: boolean;
@@ -22,6 +22,7 @@ interface DataTableProps<T = any> {
   onRowClick?: (row: T) => void;
   selectable?: boolean;
   emptyMessage?: string;
+  getRowClassName?: (row: T, index: number) => string | undefined;
 }
 
 type SortDirection = 'asc' | 'desc' | null;
@@ -32,6 +33,7 @@ export default function DataTable<T>({
   onRowClick,
   selectable = false,
   emptyMessage = '暂无数据',
+  getRowClassName,
 }: DataTableProps<T>) {
   const [sortKey, setSortKey] = useState<string | null>(null);
   const [sortDir, setSortDir] = useState<SortDirection>(null);
@@ -147,7 +149,8 @@ export default function DataTable<T>({
                   'transition-colors',
                   (rowIndex % 2 === 1) && 'bg-slate-50/50',
                   onRowClick && 'cursor-pointer hover:bg-primary-50/60',
-                  selectedRows.has(rowIndex) && 'bg-primary-50'
+                  selectedRows.has(rowIndex) && 'bg-primary-50',
+                  getRowClassName?.(row, rowIndex)
                 )}
                 onClick={() => onRowClick?.(row)}
               >

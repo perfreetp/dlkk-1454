@@ -91,6 +91,9 @@ export interface FailedFile {
   errorMessage: string;
   retryCount: number;
   failedAt: string;
+  processingStatus?: 'pending' | 'processing' | 'resolved' | 'skipped' | 'failed';
+  resolvedAt?: string;
+  resolutionNote?: string;
 }
 
 export type ScheduleType = 'once' | 'daily' | 'weekly' | 'monthly' | 'cron';
