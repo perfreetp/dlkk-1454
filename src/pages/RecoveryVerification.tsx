@@ -35,13 +35,15 @@ import {
   Package,
   List,
   Copy,
+  Loader2,
+  Zap,
 } from 'lucide-react';
 import DataTable, { type ColumnDef } from '@/components/common/DataTable';
 import ProgressBar from '@/components/common/ProgressBar';
 import StatusBadge from '@/components/common/StatusBadge';
 import Timeline from '@/components/common/Timeline';
 import { useAppStore } from '@/store/appStore';
-import { backupVersions, targetLocations, migrationTasks, type BackupVersion, type VerificationResult, type VerificationDetail } from '@/data/mockData';
+import { backupVersions, targetLocations, migrationTasks, type BackupVersion, type VerificationResult, type VerificationDetail, type VerificationFileDetail } from '@/data/mockData';
 import { formatDateTime, truncateHash, formatFileSize as formatBytes } from '@/utils/formatters';
 import { cn } from '@/lib/utils';
 
@@ -1024,7 +1026,8 @@ function RecoveryTab() {
       fileIds: recoveryMode === 'full' ? [] : effectiveFileIds,
       overwriteExisting: conflictStrategy === 'overwrite',
       totalSize: formatFileSize(effectiveTotalSize),
-    });
+      totalSizeBytes: effectiveTotalSize,
+    } as any);
 
     setLastTaskId(taskId);
     setShowConfirmModal(false);
@@ -1467,23 +1470,246 @@ function ConfirmModal({
   );
 }
 
+const formatDateForFilename = (iso?: string) => (iso ?? new Date().toISOString()).slice(0,19).replace(/[:T]/g,'-');
+
+function generateMockDetails(vr: VerificationResult): VerificationFileDetail[] {
+  const count = Math.max(10, Math.min(50, vr.totalFiles));
+  const failedCount = vr.failedFiles || 0;
+  const exts = ['xlsx', 'pdf', 'docx', 'json', 'csv', 'jpg', 'png', 'mp4', 'zip', 'log'];
+  const dirs = vr.type === 'recovery'
+    ? ['/backup/restored/docs', '/backup/restored/images', '/backup/restored/data']
+    : ['/data/migrated/finance', '/data/migrated/crm', '/data/migrated/media'];
+  const algo = vr.type === 'recovery' ? 'sha256' : 'md5';
+  const details: VerificationFileDetail[] = [];
+
+  for (let i = 0; i < count; i++) {
+    const ext = exts[i % exts.length];
+    const dir = dirs[i % dirs.length];
+    const fileName = `file_${String(i + 1).padStart(4, '0')}.${ext}`;
+    const filePath = `${dir}/${fileName}`;
+    const sizeBytes = 100 * 1024 + Math.floor(Math.random() * 5 * 1024 * 1024);
+    const size = formatBytes(sizeBytes);
+    const baseHash = `${vr.id}-file-${i}`.padEnd(16, '0').slice(0, 16);
+    const isFailed = i < failedCount;
+    const sourceChecksum = baseHash;
+    const targetChecksum = isFailed ? baseHash.split('').reverse().join('') : baseHash;
+    let failedReason: string | undefined;
+    if (isFailed) {
+      failedReason = i % 2 === 0 ? '校验值不匹配' : '文件大小不匹配';
+    }
+    details.push({
+      id: `mock-${vr.id}-${i}`,
+      fileName,
+      filePath,
+      size,
+      sizeBytes,
+      sourceChecksum,
+      targetChecksum,
+      passed: !isFailed,
+      failedReason,
+      algorithm: algo as 'md5' | 'sha256',
+    });
+  }
+  return details;
+}
+
+interface ToastState {
+  show: boolean;
+  message: string;
+  type: 'success' | 'error' | 'info';
+}
+
+function useVerificationCsvExport() {
+  const [toast, setToast] = useState<ToastState>({ show: false, message: '', type: 'success' });
+
+  const showToast = (message: string, type: ToastState['type'] = 'success') => {
+    setToast({ show: true, message, type });
+    setTimeout(() => setToast({ show: false, message: '', type: 'success' }), 3000);
+  };
+
+  const exportVerificationCsv = (vr: VerificationResult) => {
+    const details = vr.fileDetails ?? generateMockDetails(vr);
+    const headers = [
+      '序号','状态','文件名','完整路径','文件大小',
+      '校验算法','源端校验值','目标端校验值','校验结果','失败原因'
+    ];
+    const rows = details.map((d, i) => ([
+      i + 1,
+      d.passed ? '通过' : '异常',
+      d.fileName,
+      d.filePath,
+      d.size ?? formatBytes(d.sizeBytes ?? 0),
+      (d.algorithm ?? 'md5').toUpperCase(),
+      d.sourceChecksum,
+      d.targetChecksum,
+      d.sourceChecksum === d.targetChecksum ? '一致' : '不一致',
+      d.failedReason ?? (d.passed ? '' : '校验值不匹配')
+    ]));
+    const csv = '\uFEFF' + [headers, ...rows].map(r =>
+      r.map(cell => {
+        const s = String(cell ?? '').replace(/"/g, '""');
+        return /[",\n]/.test(s) ? `"${s}"` : s;
+      }).join(',')
+    ).join('\n');
+    const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    const safeName = `${vr.type ?? 'verification'}-${vr.taskName ?? vr.id}-${formatDateForFilename(vr.createdAt)}.csv`;
+    a.download = safeName;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+    showToast(`已生成并下载：${safeName}`, 'success');
+  };
+
+  const ToastComponent = toast.show ? (
+    <div className={cn(
+      'fixed top-6 right-6 z-50 rounded-xl shadow-lg px-5 py-4 flex items-center gap-3 animate-in slide-in-from-right border',
+      toast.type === 'success' && 'bg-emerald-50 border-emerald-200',
+      toast.type === 'error' && 'bg-rose-50 border-rose-200',
+      toast.type === 'info' && 'bg-sky-50 border-sky-200'
+    )}>
+      <div className={cn(
+        'w-10 h-10 rounded-full flex items-center justify-center flex-shrink-0',
+        toast.type === 'success' && 'bg-emerald-100',
+        toast.type === 'error' && 'bg-rose-100',
+        toast.type === 'info' && 'bg-sky-100'
+      )}>
+        {toast.type === 'success' && <CheckCircle className="h-5 w-5 text-emerald-600" />}
+        {toast.type === 'error' && <XCircle className="h-5 w-5 text-rose-600" />}
+        {toast.type === 'info' && <AlertTriangle className="h-5 w-5 text-sky-600" />}
+      </div>
+      <div className={cn(
+        'font-semibold text-sm',
+        toast.type === 'success' && 'text-emerald-800',
+        toast.type === 'error' && 'text-rose-800',
+        toast.type === 'info' && 'text-sky-800'
+      )}>
+        {toast.message}
+      </div>
+    </div>
+  ) : null;
+
+  return { exportVerificationCsv, ToastComponent };
+}
+
 interface VerificationTabProps {
   expandedId?: string | null;
   onExpandedChange?: (id: string | null) => void;
 }
 
+interface VerificationGroup {
+  taskId: string;
+  taskName: string;
+  results: VerificationResult[];
+}
+
 function VerificationTab({ expandedId, onExpandedChange }: VerificationTabProps) {
   const store = useAppStore();
   const [internalExpandedId, setInternalExpandedId] = useState<string | null>(null);
+  const [expandedGroupIds, setExpandedGroupIds] = useState<Set<string>>(new Set());
   const [showNewVerification, setShowNewVerification] = useState(false);
   const [newTaskId, setNewTaskId] = useState<string>('');
   const [newVerificationType, setNewVerificationType] = useState<'migration' | 'recovery'>('migration');
   const [algorithm, setAlgorithm] = useState<'MD5' | 'SHA256'>('SHA256');
   const [showSuccess, setShowSuccess] = useState(false);
+  const [highlightedVrId, setHighlightedVrId] = useState<string | null>(null);
+
+  const [filterType, setFilterType] = useState<'all' | 'migration' | 'recovery'>('all');
+  const [filterResult, setFilterResult] = useState<'all' | 'pass' | 'fail'>('all');
+  const [filterKeyword, setFilterKeyword] = useState('');
+  const [debouncedKeyword, setDebouncedKeyword] = useState('');
+
+  const { exportVerificationCsv, ToastComponent: CsvToast } = useVerificationCsvExport();
+
+  useEffect(() => {
+    const timer = setTimeout(() => setDebouncedKeyword(filterKeyword), 300);
+    return () => clearTimeout(timer);
+  }, [filterKeyword]);
 
   const verificationResults = store.verificationResults;
   const migrationTaskList = migrationTasks;
   const recoveryTaskList = store.recoveryTasks;
+
+  const filteredVrs = useMemo(() => {
+    return verificationResults.filter(vr => {
+      if (filterType !== 'all' && vr.type !== filterType) return false;
+      const pass = (vr.successRate ?? 100) >= 100 && (vr.failedFiles ?? 0) === 0;
+      if (filterResult === 'pass' && !pass) return false;
+      if (filterResult === 'fail' && pass) return false;
+      if (debouncedKeyword) {
+        const k = debouncedKeyword.toLowerCase();
+        const text = `${vr.taskName ?? ''} ${vr.id} ${vr.taskId ?? ''} ${vr.name ?? ''}`.toLowerCase();
+        if (!text.includes(k)) return false;
+      }
+      return true;
+    });
+  }, [verificationResults, filterType, filterResult, debouncedKeyword]);
+
+  const filterStats = useMemo(() => {
+    const total = filteredVrs.length;
+    const abnormal = filteredVrs.filter(vr => (vr.successRate ?? 100) < 100 || (vr.failedFiles ?? 0) > 0).length;
+    return { total, abnormal };
+  }, [filteredVrs]);
+
+  const resetFilters = () => {
+    setFilterType('all');
+    setFilterResult('all');
+    setFilterKeyword('');
+    setDebouncedKeyword('');
+  };
+
+  const groupedResults = useMemo<VerificationGroup[]>(() => {
+    const groupMap = new Map<string, VerificationGroup>();
+    filteredVrs.forEach((vr) => {
+      const existing = groupMap.get(vr.taskId);
+      if (existing) {
+        existing.results.push(vr);
+      } else {
+        groupMap.set(vr.taskId, {
+          taskId: vr.taskId,
+          taskName: vr.taskName || vr.name,
+          results: [vr],
+        });
+      }
+    });
+    const groups = Array.from(groupMap.values());
+    groups.forEach((g) => {
+      g.results.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+    });
+    groups.sort((a, b) => {
+      const aLatest = a.results[0]?.createdAt ?? '';
+      const bLatest = b.results[0]?.createdAt ?? '';
+      return new Date(bLatest).getTime() - new Date(aLatest).getTime();
+    });
+    return groups;
+  }, [filteredVrs]);
+
+  const toggleGroup = (taskId: string) => {
+    setExpandedGroupIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(taskId)) {
+        next.delete(taskId);
+      } else {
+        next.add(taskId);
+      }
+      return next;
+    });
+  };
+
+  const handleClearCache = () => {
+    const confirmed = window.confirm('确认清空所有手动生成的校验报告和恢复任务？内置数据会保留。');
+    if (confirmed) {
+      store.clearPersistenceAndReset();
+    }
+  };
+
+  const getSuccessRate = (vr: VerificationResult): number => {
+    if (typeof vr.successRate === 'number') return vr.successRate;
+    return vr.totalFiles > 0 ? Math.round((vr.passedFiles / vr.totalFiles) * 10000) / 100 : 0;
+  };
 
   const effectiveExpandedId = expandedId !== undefined ? expandedId : internalExpandedId;
   const setEffectiveExpandedId = (id: string | null) => {
@@ -1496,12 +1722,18 @@ function VerificationTab({ expandedId, onExpandedChange }: VerificationTabProps)
 
   useEffect(() => {
     if (expandedId) {
-      const el = document.getElementById(`verification-card-${expandedId}`);
-      if (el) {
-        el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      const targetGroup = groupedResults.find((g) => g.results.some((r) => r.id === expandedId));
+      if (targetGroup) {
+        setExpandedGroupIds((prev) => new Set(prev).add(targetGroup.taskId));
       }
+      setTimeout(() => {
+        const el = document.getElementById(`verification-card-${expandedId}`);
+        if (el) {
+          el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        }
+      }, 50);
     }
-  }, [expandedId]);
+  }, [expandedId, groupedResults]);
 
   const handleGenerateVerification = () => {
     if (!newTaskId) return;
@@ -1534,6 +1766,10 @@ function VerificationTab({ expandedId, onExpandedChange }: VerificationTabProps)
     setNewTaskId('');
     setShowSuccess(true);
     setTimeout(() => setShowSuccess(false), 3000);
+
+    setExpandedGroupIds((prev) => new Set(prev).add(newTaskId));
+    setHighlightedVrId(newVrId);
+    setTimeout(() => setHighlightedVrId(null), 3000);
 
     setTimeout(() => {
       setEffectiveExpandedId(newVrId);
@@ -1572,6 +1808,36 @@ function VerificationTab({ expandedId, onExpandedChange }: VerificationTabProps)
     setShowNewVerification(true);
   };
 
+  const SegmentedButton = <T extends string>({
+    value,
+    options,
+    onChange,
+  }: {
+    value: T;
+    options: { key: T; label: string }[];
+    onChange: (v: T) => void;
+  }) => (
+    <div className="inline-flex items-center bg-slate-100 rounded-lg p-0.5">
+      {options.map((opt) => {
+        const active = value === opt.key;
+        return (
+          <button
+            key={opt.key}
+            onClick={() => onChange(opt.key)}
+            className={cn(
+              'px-3 py-1.5 text-xs font-medium rounded-md transition-all',
+              active
+                ? 'bg-primary-600 text-white shadow-sm shadow-primary-500/20'
+                : 'text-slate-600 hover:text-slate-800 hover:bg-slate-200/60'
+            )}
+          >
+            {opt.label}
+          </button>
+        );
+      })}
+    </div>
+  );
+
   return (
     <div className="space-y-6">
       {showSuccess && (
@@ -1585,6 +1851,7 @@ function VerificationTab({ expandedId, onExpandedChange }: VerificationTabProps)
           </div>
         </div>
       )}
+      {CsvToast}
 
       <div className="flex items-center justify-between">
         <div>
@@ -1592,7 +1859,7 @@ function VerificationTab({ expandedId, onExpandedChange }: VerificationTabProps)
             <FileCheck className="h-5 w-5 text-emerald-600" />
             完整性校验报告
           </h2>
-          <p className="text-sm text-slate-500 mt-1">查看数据完整性校验结果，确保迁移/恢复数据准确无误</p>
+          <p className="text-sm text-slate-500 mt-1">查看数据完整性校验结果，按任务分组展示历史版本</p>
         </div>
         <button
           onClick={openNewVerificationModal}
@@ -1603,7 +1870,56 @@ function VerificationTab({ expandedId, onExpandedChange }: VerificationTabProps)
         </button>
       </div>
 
-      <div className="space-y-4">
+      <div className="bg-white rounded-xl border border-slate-200 p-4 flex flex-wrap items-center gap-4 justify-between">
+        <div className="flex flex-wrap items-center gap-3">
+          <div className="flex items-center gap-2">
+            <span className="text-xs font-medium text-slate-500 whitespace-nowrap">类型</span>
+            <SegmentedButton
+              value={filterType}
+              options={[
+                { key: 'all', label: '全部' },
+                { key: 'migration', label: '迁移校验' },
+                { key: 'recovery', label: '恢复校验' },
+              ]}
+              onChange={(v) => setFilterType(v as 'all' | 'migration' | 'recovery')}
+            />
+          </div>
+          <div className="flex items-center gap-2">
+            <span className="text-xs font-medium text-slate-500 whitespace-nowrap">结果</span>
+            <SegmentedButton
+              value={filterResult}
+              options={[
+                { key: 'all', label: '全部' },
+                { key: 'pass', label: '通过' },
+                { key: 'fail', label: '异常' },
+              ]}
+              onChange={(v) => setFilterResult(v as 'all' | 'pass' | 'fail')}
+            />
+          </div>
+          <div className="relative min-w-[200px]">
+            <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-slate-400" />
+            <input
+              type="text"
+              value={filterKeyword}
+              onChange={(e) => setFilterKeyword(e.target.value)}
+              placeholder="搜索任务名、报告ID..."
+              className="w-full pl-9 pr-3 py-2 bg-white border border-slate-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-primary-500 focus:border-primary-500"
+            />
+          </div>
+        </div>
+        <div className="flex items-center gap-2 text-xs text-slate-500">
+          <span>
+            共 <strong className="text-slate-700">{filterStats.total}</strong> 份报告
+          </span>
+          {filterStats.abnormal > 0 && (
+            <span className="inline-flex items-center px-2 py-0.5 rounded-full bg-rose-100 text-rose-700 text-[11px] font-semibold border border-rose-200">
+              {filterStats.abnormal} 份异常
+            </span>
+          )}
+        </div>
+      </div>
+
+      <div className="space-y-5">
         {verificationResults.length === 0 ? (
           <div className="py-20 text-center bg-white rounded-xl border border-dashed border-slate-200">
             <div className="inline-flex items-center justify-center w-16 h-16 rounded-2xl bg-slate-100 mb-4">
@@ -1612,111 +1928,218 @@ function VerificationTab({ expandedId, onExpandedChange }: VerificationTabProps)
             <div className="text-sm font-medium text-slate-700">暂无校验报告</div>
             <div className="text-xs text-slate-400 mt-1">点击右上角按钮生成新的校验任务</div>
           </div>
+        ) : filteredVrs.length === 0 ? (
+          <div className="py-20 text-center bg-white rounded-xl border border-dashed border-slate-200">
+            <div className="inline-flex items-center justify-center w-16 h-16 rounded-2xl bg-slate-100 mb-4">
+              <Search className="h-8 w-8 text-slate-400" />
+            </div>
+            <div className="text-sm font-medium text-slate-700">未找到符合条件的报告</div>
+            <div className="text-xs text-slate-400 mt-1">试试调整类型、结果或关键词筛选</div>
+            <button
+              onClick={resetFilters}
+              className="mt-4 inline-flex items-center gap-1.5 px-4 py-2 bg-primary-600 text-white rounded-lg text-xs font-medium hover:bg-primary-700 shadow-sm shadow-primary-500/20 transition-all"
+            >
+              <RotateCcw className="h-3.5 w-3.5" />
+              重置筛选
+            </button>
+          </div>
         ) : (
-          verificationResults.map((result) => {
-            const missing = result.totalFiles - result.verifiedFiles;
-            const failed = result.failedFiles;
-            const passed = result.passedFiles;
-
-            let statusConfig: { label: string; dot: string; bg: string; text: string };
-            if (failed === 0 && missing === 0) {
-              statusConfig = { label: '全部通过', dot: 'bg-emerald-500', bg: 'bg-emerald-50', text: 'text-emerald-700' };
-            } else if (missing > 0) {
-              statusConfig = { label: '有缺失', dot: 'bg-rose-500', bg: 'bg-rose-50', text: 'text-rose-700' };
-            } else {
-              statusConfig = { label: '部分通过', dot: 'bg-amber-500', bg: 'bg-amber-50', text: 'text-amber-700' };
-            }
-
-            const isExpanded = effectiveExpandedId === result.id;
-            const isHighlighted = expandedId === result.id;
-            const details = generateMockVerificationDetails(result);
+          groupedResults.map((group) => {
+            const isGroupExpanded = expandedGroupIds.size === 0
+              ? true
+              : expandedGroupIds.has(group.taskId);
+            const historyCount = group.results.length;
 
             return (
-              <div
-                key={result.id}
-                id={`verification-card-${result.id}`}
-                className={cn(
-                  'bg-white rounded-xl border overflow-hidden transition-all',
-                  isHighlighted
-                    ? 'border-primary-400 ring-2 ring-primary-100 shadow-lg'
-                    : 'border-slate-200'
-                )}
-              >
-                <div className="p-5">
-                  <div className="flex flex-wrap items-start justify-between gap-4">
-                    <div className="flex-1 min-w-0">
-                      <div className="flex flex-wrap items-center gap-3 mb-2">
-                        <h3 className="font-bold text-slate-900 truncate">{result.name}</h3>
-                        {getTypeBadge(result.type)}
-                        <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[10px] font-semibold bg-slate-100 text-slate-600 border border-slate-200">
-                          <Hash className="h-3 w-3" />
-                          {algorithm}
-                        </span>
-                        <span className={cn(
-                          'inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium',
-                          statusConfig.bg,
-                          statusConfig.text
-                        )}>
-                          <span className={cn('w-2 h-2 rounded-full', statusConfig.dot)} />
-                          {statusConfig.label}
-                        </span>
-                      </div>
-                      <div className="text-xs text-slate-400 flex flex-wrap items-center gap-3">
-                        <span className="flex items-center gap-1">
-                          <Calendar className="h-3 w-3" />
-                          生成时间：{formatDateTime(result.startTime)}
-                        </span>
-                        <span>历时：{Math.max(1, Math.floor((new Date(result.endTime).getTime() - new Date(result.startTime).getTime()) / 1000))} 秒</span>
-                      </div>
-                    </div>
-
-                    <div className="flex flex-wrap items-center gap-4">
-                      <div className="flex items-center gap-4 text-xs">
-                        <StatMini label="总文件" value={result.totalFiles.toLocaleString()} color="slate" />
-                        <StatMini label="通过" value={passed.toLocaleString()} color="emerald" />
-                        <StatMini label="不匹配" value={failed.toLocaleString()} color={failed > 0 ? 'amber' : 'slate'} />
-                        <StatMini label="缺失" value={missing.toLocaleString()} color={missing > 0 ? 'rose' : 'slate'} />
-                      </div>
-                      <button
-                        onClick={() => setEffectiveExpandedId(isExpanded ? null : result.id)}
-                        className="inline-flex items-center gap-1.5 px-3 py-2 bg-slate-50 border border-slate-200 rounded-lg text-xs font-medium text-slate-600 hover:bg-slate-100 transition-all"
-                      >
-                        <Eye className="h-3.5 w-3.5" />
-                        {isExpanded ? '收起详情' : '查看详情'}
-                        {isExpanded ? <ChevronUp className="h-3.5 w-3.5" /> : <ChevronDown className="h-3.5 w-3.5" />}
-                      </button>
-                    </div>
-                  </div>
-
-                  <div className="mt-4">
-                    <ProgressBar
-                      value={passed}
-                      max={result.totalFiles || 1}
-                      showValue
-                      size="sm"
-                      variant={
-                        failed === 0 && missing === 0 ? 'success' :
-                        missing > 0 ? 'danger' : 'warning'
+              <div key={group.taskId} className="space-y-3">
+                <button
+                  onClick={() => toggleGroup(group.taskId)}
+                  className="w-full flex items-center justify-between gap-3 p-4 bg-white rounded-xl border border-slate-200 hover:border-slate-300 hover:bg-slate-50/50 transition-all text-left group"
+                >
+                  <div className="flex items-center gap-3 min-w-0 flex-1">
+                    <div className={cn(
+                      'flex items-center justify-center w-8 h-8 rounded-lg transition-all',
+                      isGroupExpanded ? 'bg-primary-100 text-primary-600' : 'bg-slate-100 text-slate-500 group-hover:bg-slate-200'
+                    )}>
+                      {isGroupExpanded
+                        ? <ChevronUp className="h-4 w-4 transition-transform" />
+                        : <ChevronDown className="h-4 w-4 transition-transform" />
                       }
-                    />
-                  </div>
-                </div>
-
-                {isExpanded && (
-                  <div className="border-t border-slate-100">
-                    <div className="px-5 py-3 bg-slate-50/60 border-b border-slate-100 flex items-center justify-between">
-                      <h4 className="text-xs font-semibold text-slate-700">校验明细</h4>
-                      <span className="text-xs text-slate-400">
-                        显示前 {details.length} 条记录
-                      </span>
                     </div>
-                    <VerificationDetailsTable details={details} />
+                    <div className="min-w-0 flex-1">
+                      <div className="flex flex-wrap items-center gap-2 mb-1">
+                        <h3 className="font-bold text-slate-900 truncate">
+                          任务：{group.taskName}
+                        </h3>
+                        {group.results[0]?.type && getTypeBadge(group.results[0].type)}
+                      </div>
+                      <div className="flex flex-wrap items-center gap-3 text-xs text-slate-400">
+                        <span className="font-mono bg-slate-50 px-1.5 py-0.5 rounded border border-slate-200">
+                          {group.taskId}
+                        </span>
+                        <span>
+                          最新：{group.results[0] ? formatDateTime(group.results[0].createdAt) : '--'}
+                        </span>
+                      </div>
+                    </div>
+                  </div>
+                  <div className="flex items-center gap-2 flex-shrink-0">
+                    <span className="inline-flex items-center justify-center min-w-[32px] h-6 px-2 rounded-full bg-slate-100 text-slate-600 text-[11px] font-semibold border border-slate-200">
+                      {historyCount} 份
+                    </span>
+                  </div>
+                </button>
+
+                {isGroupExpanded && (
+                  <div className="space-y-3 pl-4 border-l-2 border-slate-100 ml-4">
+                    {group.results.map((vr, idx) => {
+                      const isLatest = idx === 0;
+                      const missing = vr.totalFiles - vr.verifiedFiles;
+                      const failed = vr.failedFiles;
+                      const passed = vr.passedFiles;
+
+                      let statusConfig: { label: string; dot: string; bg: string; text: string; icon: React.ReactNode };
+                      if (failed === 0 && missing === 0) {
+                        statusConfig = { label: '全部通过', dot: 'bg-emerald-500', bg: 'bg-emerald-50', text: 'text-emerald-700', icon: <CheckCircle className="h-3.5 w-3.5" /> };
+                      } else if (missing > 0) {
+                        statusConfig = { label: '有缺失', dot: 'bg-rose-500', bg: 'bg-rose-50', text: 'text-rose-700', icon: <XCircle className="h-3.5 w-3.5" /> };
+                      } else {
+                        statusConfig = { label: '部分通过', dot: 'bg-amber-500', bg: 'bg-amber-50', text: 'text-amber-700', icon: <AlertTriangle className="h-3.5 w-3.5" /> };
+                      }
+
+                      const isExpanded = effectiveExpandedId === vr.id;
+                      const isHighlighted = highlightedVrId === vr.id || expandedId === vr.id;
+                      const details = generateMockVerificationDetails(vr);
+                      const rate = getSuccessRate(vr);
+
+                      return (
+                        <div
+                          key={vr.id}
+                          id={`verification-card-${vr.id}`}
+                          className={cn(
+                            'rounded-xl border overflow-hidden transition-all relative',
+                            isHighlighted
+                              ? 'border-primary-400 ring-2 ring-primary-100 shadow-lg z-10'
+                              : 'border-slate-200 bg-white',
+                            !isLatest && 'opacity-95'
+                          )}
+                        >
+                          <div className={cn('relative', isLatest ? 'p-5' : 'p-4')}>
+                            {!isLatest && (
+                              <div className="absolute top-2 left-2 inline-flex items-center gap-1 px-2 py-0.5 rounded text-[9px] font-semibold bg-slate-200 text-slate-600 border border-slate-300 z-10">
+                                <Clock className="h-2.5 w-2.5" />
+                                历史
+                              </div>
+                            )}
+                            <div className="flex flex-wrap items-start justify-between gap-3">
+                              <div className="flex-1 min-w-0">
+                                <div className="flex flex-wrap items-center gap-2 mb-1.5">
+                                  <h3 className={cn('font-bold truncate', isLatest ? 'text-slate-900 text-[15px]' : 'text-slate-800 text-sm')}>
+                                    {vr.name}
+                                  </h3>
+                                  {getTypeBadge(vr.type)}
+                                  <span className={cn(
+                                    'inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-[11px] font-medium',
+                                    statusConfig.bg,
+                                    statusConfig.text
+                                  )}>
+                                    {statusConfig.icon}
+                                    {statusConfig.label} · {rate.toFixed(1)}%
+                                  </span>
+                                </div>
+                                <div className="text-xs text-slate-400 flex flex-wrap items-center gap-3">
+                                  <span className="flex items-center gap-1">
+                                    <Calendar className="h-3 w-3" />
+                                    {formatDateTime(vr.createdAt)}
+                                  </span>
+                                  {isLatest && (
+                                    <span>历时：{Math.max(1, Math.floor((new Date(vr.endTime).getTime() - new Date(vr.startTime).getTime()) / 1000))} 秒</span>
+                                  )}
+                                </div>
+                              </div>
+
+                              <div className="flex flex-wrap items-center gap-3">
+                                <div className="flex items-center gap-3 text-xs">
+                                  <StatMini label="总数" value={vr.totalFiles.toLocaleString()} color="slate" compact={!isLatest} />
+                                  <StatMini label="通过" value={passed.toLocaleString()} color="emerald" compact={!isLatest} />
+                                  <StatMini label="异常" value={failed.toLocaleString()} color={failed > 0 ? 'amber' : 'slate'} compact={!isLatest} />
+                                </div>
+                                <div className="flex items-center gap-1.5">
+                                  {isLatest && (
+                                    <button
+                                      onClick={() => exportVerificationCsv(vr)}
+                                      disabled={vr.totalFiles === 0}
+                                      className={cn(
+                                        'inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-[11px] font-medium border transition-all',
+                                        vr.totalFiles === 0
+                                          ? 'bg-slate-50 text-slate-400 border-slate-200 cursor-not-allowed'
+                                          : 'bg-white text-slate-700 border-slate-200 hover:bg-slate-50 hover:border-slate-300'
+                                      )}
+                                      title="导出 CSV"
+                                    >
+                                      <Download className="h-3 w-3" />
+                                      CSV
+                                    </button>
+                                  )}
+                                  <button
+                                    onClick={() => setEffectiveExpandedId(isExpanded ? null : vr.id)}
+                                    className={cn(
+                                      'inline-flex items-center gap-1 px-2.5 py-1.5 bg-slate-50 border border-slate-200 rounded-lg font-medium text-slate-600 hover:bg-slate-100 transition-all',
+                                      isLatest ? 'text-xs py-2 px-3' : 'text-[11px]'
+                                    )}
+                                  >
+                                    <Eye className="h-3 w-3" />
+                                    {isExpanded ? '收起' : '详情'}
+                                    {isExpanded ? <ChevronUp className="h-3 w-3" /> : <ChevronDown className="h-3 w-3" />}
+                                  </button>
+                                </div>
+                              </div>
+                            </div>
+
+                            <div className={cn('mt-3', !isLatest && 'mt-2')}>
+                              <ProgressBar
+                                value={passed}
+                                max={vr.totalFiles || 1}
+                                showValue
+                                size={isLatest ? 'sm' : 'xs'}
+                                variant={
+                                  failed === 0 && missing === 0 ? 'success' :
+                                  missing > 0 ? 'danger' : 'warning'
+                                }
+                              />
+                            </div>
+                          </div>
+
+                          {isExpanded && (
+                            <div className="border-t border-slate-100">
+                              <div className="px-5 py-3 bg-slate-50/60 border-b border-slate-100 flex items-center justify-between">
+                                <h4 className="text-xs font-semibold text-slate-700">校验明细</h4>
+                                <span className="text-xs text-slate-400">
+                                  显示前 {details.length} 条记录
+                                </span>
+                              </div>
+                              <VerificationDetailsTable details={details} />
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })}
                   </div>
                 )}
               </div>
             );
           })
         )}
+      </div>
+
+      <div className="pt-2 flex justify-center">
+        <button
+          onClick={handleClearCache}
+          className="inline-flex items-center gap-1.5 px-4 py-2 text-[11px] text-slate-400 hover:text-slate-600 hover:bg-slate-50 border border-slate-200 hover:border-slate-300 rounded-lg transition-all font-medium"
+        >
+          <RotateCcw className="h-3 w-3" />
+          清空本地报告缓存
+        </button>
       </div>
 
       {showNewVerification && (
@@ -1873,7 +2296,7 @@ function VerificationTab({ expandedId, onExpandedChange }: VerificationTabProps)
   );
 }
 
-function StatMini({ label, value, color }: { label: string; value: string; color: 'slate' | 'emerald' | 'amber' | 'rose' }) {
+function StatMini({ label, value, color, compact }: { label: string; value: string; color: 'slate' | 'emerald' | 'amber' | 'rose'; compact?: boolean }) {
   const colorMap = {
     slate: 'text-slate-700',
     emerald: 'text-emerald-700',
@@ -1881,9 +2304,9 @@ function StatMini({ label, value, color }: { label: string; value: string; color
     rose: 'text-rose-700',
   };
   return (
-    <div className="text-center">
-      <div className={cn('font-mono font-bold text-sm', colorMap[color])}>{value}</div>
-      <div className="text-[10px] text-slate-400 uppercase tracking-wide">{label}</div>
+    <div className={cn('text-center', compact && 'scale-90 origin-center')}>
+      <div className={cn('font-mono font-bold', compact ? 'text-[13px]' : 'text-sm', colorMap[color])}>{value}</div>
+      <div className={cn('text-slate-400 uppercase tracking-wide', compact ? 'text-[9px]' : 'text-[10px]')}>{label}</div>
     </div>
   );
 }
@@ -2036,11 +2459,58 @@ interface RecoveryTaskDrawerProps {
   onViewVerificationReport: (taskId: string) => void;
 }
 
+function formatDurationFromNow(isoEnd?: string): string {
+  if (!isoEnd) return '计算中...';
+  const diffMs = new Date(isoEnd).getTime() - Date.now();
+  const diffSec = Math.max(0, Math.floor(diffMs / 1000));
+  if (diffSec >= 3600) {
+    const h = Math.floor(diffSec / 3600);
+    const m = Math.floor((diffSec % 3600) / 60);
+    return `约 ${h} 小时 ${m} 分`;
+  }
+  if (diffSec >= 60) {
+    const m = Math.floor(diffSec / 60);
+    const s = diffSec % 60;
+    return `约 ${m} 分 ${s} 秒`;
+  }
+  return `约 ${diffSec} 秒`;
+}
+
+function formatDurationBetween(startIso: string, endIso: string): string {
+  const diffMs = new Date(endIso).getTime() - new Date(startIso).getTime();
+  const diffSec = Math.max(0, Math.floor(diffMs / 1000));
+  if (diffSec >= 3600) {
+    const h = Math.floor(diffSec / 3600);
+    const m = Math.floor((diffSec % 3600) / 60);
+    return `约 ${h} 小时 ${m} 分`;
+  }
+  if (diffSec >= 60) {
+    const m = Math.floor(diffSec / 60);
+    const s = diffSec % 60;
+    return `约 ${m} 分 ${s} 秒`;
+  }
+  return `约 ${diffSec} 秒`;
+}
+
+function formatSpeed(bytesPerSec?: number): string {
+  if (!bytesPerSec) return '-- MB/s';
+  const mb = bytesPerSec / (1024 * 1024);
+  return `${mb.toFixed(0)} MB/s`;
+}
+
 function RecoveryTaskDrawer({ open, onClose, onViewVerificationReport }: RecoveryTaskDrawerProps) {
   const store = useAppStore();
   const recoveryTasks = store.recoveryTasks;
   const verificationResults = store.verificationResults;
   const [copiedId, setCopiedId] = useState<string | null>(null);
+  const [, forceTick] = useState(0);
+  const [highlightId, setHighlightId] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    const id = setInterval(() => forceTick((n) => n + 1), 1000);
+    return () => clearInterval(id);
+  }, [open]);
 
   const handleCopyId = async (id: string) => {
     try {
@@ -2052,22 +2522,202 @@ function RecoveryTaskDrawer({ open, onClose, onViewVerificationReport }: Recover
     }
   };
 
-  const getStatusBadge = (status: string) => {
-    const config: Record<string, { label: string; className: string }> = {
-      pending: { label: '等待中', className: 'bg-slate-100 text-slate-700 border-slate-200' },
-      running: { label: '进行中', className: 'bg-sky-50 text-sky-700 border-sky-200' },
-      completed: { label: '已完成', className: 'bg-emerald-50 text-emerald-700 border-emerald-200' },
-      failed: { label: '失败', className: 'bg-rose-50 text-rose-700 border-rose-200' },
-      paused: { label: '已暂停', className: 'bg-amber-50 text-amber-700 border-amber-200' },
-    };
-    const cfg = config[status] || config.pending;
+  const handleViewReport = (task: any) => {
+    if (task.status !== 'completed') return;
+    const verificationId = task.relatedVerificationId;
+    const vr = verificationResults.some((v) => v.taskId === task.id);
+    if (!vr) return;
+    setHighlightId(task.id);
+    setTimeout(() => setHighlightId(null), 1800);
+    onViewVerificationReport(task.id);
+  };
+
+  const getStatusBadge = (task: any) => {
+    const status = task.status;
+    if (status === 'pending') {
+      return (
+        <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[10px] font-semibold border bg-amber-50 text-amber-700 border-amber-200">
+          <Clock className="h-3 w-3" />
+          等待中
+        </span>
+      );
+    }
+    if (status === 'running') {
+      return (
+        <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[10px] font-semibold border bg-sky-50 text-sky-700 border-sky-200">
+          <Loader2 className="h-3 w-3 animate-spin" />
+          进行中
+        </span>
+      );
+    }
+    if (status === 'completed') {
+      return (
+        <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[10px] font-semibold border bg-emerald-50 text-emerald-700 border-emerald-200">
+          <Check className="h-3 w-3" />
+          已完成
+        </span>
+      );
+    }
+    if (status === 'failed') {
+      return (
+        <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[10px] font-semibold border bg-rose-50 text-rose-700 border-rose-200">
+          <XCircle className="h-3 w-3" />
+          失败
+        </span>
+      );
+    }
     return (
-      <span className={cn(
-        'inline-flex items-center px-2 py-0.5 rounded-md text-[10px] font-semibold border',
-        cfg.className
-      )}>
-        {cfg.label}
+      <span className="inline-flex items-center px-2 py-0.5 rounded-md text-[10px] font-semibold border bg-slate-100 text-slate-700 border-slate-200">
+        未知
       </span>
+    );
+  };
+
+  const renderProgress = (task: any) => {
+    const { status, progress } = task;
+    if (status === 'pending') {
+      return (
+        <div>
+          <div className="relative h-2 bg-slate-100 rounded-full overflow-hidden">
+            <div
+              className="absolute inset-y-0 left-0 bg-gradient-to-r from-amber-400 via-amber-500 to-amber-400 bg-[length:200%_100%] animate-pulse"
+              style={{ width: '100%', animation: 'shimmer 1.2s linear infinite' }}
+            />
+          </div>
+          <div className="mt-1.5 flex items-center gap-1.5 text-[11px] text-amber-600">
+            <Clock className="h-3 w-3" />
+            任务已创建，等待调度资源...
+          </div>
+        </div>
+      );
+    }
+    if (status === 'running') {
+      const totalSizeBytes = task.totalSizeBytes ?? 0;
+      const processedBytes = Math.floor(totalSizeBytes * (progress / 100));
+      return (
+        <div className="space-y-1.5">
+          <div className="relative h-2 bg-sky-50 rounded-full overflow-hidden">
+            <div
+              className="absolute inset-y-0 left-0 bg-gradient-to-r from-sky-400 to-sky-600 transition-all duration-500"
+              style={{ width: `${progress}%` }}
+            />
+          </div>
+          <div className="flex items-center justify-between text-[11px] text-slate-500">
+            <span className="font-mono text-sky-700 font-semibold">{progress}%</span>
+            <span className="font-mono">{task.processedFiles} / {task.totalFiles} 个文件</span>
+          </div>
+          <div className="flex items-center justify-between text-[11px] text-slate-500">
+            <span>
+              已处理 {formatBytes(processedBytes)} / 共 {task.totalSize || formatBytes(totalSizeBytes)}
+            </span>
+            <span className="inline-flex items-center gap-1 text-sky-600">
+              <Zap className="h-3 w-3" />
+              {formatSpeed(task.speedBytesPerSec)}
+            </span>
+          </div>
+          <div className="text-[11px] text-slate-500 flex items-center gap-1.5">
+            <Clock className="h-3 w-3" />
+            预计剩余：{formatDurationFromNow(task.estimatedEndAt)}
+          </div>
+        </div>
+      );
+    }
+    if (status === 'completed') {
+      const duration = task.startedAt && task.completedAt
+        ? formatDurationBetween(task.startedAt, task.completedAt)
+        : '--';
+      return (
+        <div className="space-y-1.5">
+          <div className="relative h-2 bg-emerald-50 rounded-full overflow-hidden">
+            <div
+              className="absolute inset-y-0 left-0 bg-gradient-to-r from-emerald-400 to-emerald-600"
+              style={{ width: '100%' }}
+            />
+          </div>
+          <div className="text-[11px] text-emerald-700 flex items-center gap-1.5">
+            <CheckCircle className="h-3.5 w-3.5" />
+            恢复完成 · {task.processedFiles} / {task.totalFiles} 个文件 · {task.totalSize}
+          </div>
+          <div className="text-[11px] text-slate-500 flex items-center gap-1.5">
+            <Clock className="h-3 w-3" />
+            耗时：{duration}
+          </div>
+        </div>
+      );
+    }
+    if (status === 'failed') {
+      const errorMsg = task.errorMessage || '目标路径权限不足';
+      return (
+        <div className="space-y-1.5">
+          <div className="relative h-2 bg-rose-50 rounded-full overflow-hidden">
+            <div
+              className="absolute inset-y-0 left-0 bg-gradient-to-r from-rose-400 to-rose-600"
+              style={{ width: `${progress}%` }}
+            />
+          </div>
+          <div className="text-[11px] text-rose-700 flex items-center gap-1.5">
+            <XCircle className="h-3.5 w-3.5" />
+            失败原因：{errorMsg}
+          </div>
+        </div>
+      );
+    }
+    return null;
+  };
+
+  const getReportButton = (task: any) => {
+    const hasVerification = !!task.relatedVerificationId ||
+      verificationResults.some((v) => v.taskId === task.id);
+    const isCompleted = task.status === 'completed';
+
+    if (task.status === 'pending') {
+      return (
+        <button
+          disabled
+          className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-xs font-medium bg-slate-50 text-slate-400 border border-slate-200 cursor-not-allowed"
+        >
+          <Clock className="h-3 w-3" />
+          等待完成
+        </button>
+      );
+    }
+    if (task.status === 'running') {
+      return (
+        <button
+          disabled
+          className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-xs font-medium bg-slate-50 text-slate-400 border border-slate-200 cursor-not-allowed"
+        >
+          <Loader2 className="h-3 w-3 animate-spin" />
+          校验待生成
+        </button>
+      );
+    }
+    if (task.status === 'failed') {
+      return (
+        <button
+          disabled
+          className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-xs font-medium bg-slate-50 text-slate-400 border border-slate-200 cursor-not-allowed"
+        >
+          <XCircle className="h-3 w-3" />
+          无校验报告
+        </button>
+      );
+    }
+    const isHighlighted = highlightId === task.id;
+    return (
+      <button
+        onClick={() => handleViewReport(task)}
+        className={cn(
+          'inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-xs font-medium transition-all border',
+          isHighlighted
+            ? 'bg-emerald-100 text-emerald-800 border-emerald-400 shadow-md shadow-emerald-200 scale-105'
+            : 'bg-primary-50 text-primary-700 hover:bg-primary-100 border-primary-200'
+        )}
+        style={isHighlighted ? { animation: 'pulse 0.6s ease-in-out 2' } : undefined}
+      >
+        <FileCheck className="h-3 w-3" />
+        查看校验报告
+      </button>
     );
   };
 
@@ -2120,13 +2770,17 @@ function RecoveryTaskDrawer({ open, onClose, onViewVerificationReport }: Recover
               .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())
               .map((task) => {
                 const version = store.backupVersions.find((v) => v.id === task.versionId);
-                const hasVerification = verificationResults.some((v) => v.taskId === task.id);
                 const isFullRecovery = !task.fileIds || task.fileIds.length === 0;
                 const selectedCount = task.fileIds?.length || 0;
                 return (
                   <div
                     key={task.id}
-                    className="bg-white rounded-xl border border-slate-200 p-4 space-y-3 hover:border-slate-300 transition-all"
+                    className={cn(
+                      'bg-white rounded-xl border p-4 space-y-3 transition-all',
+                      highlightId === task.id
+                        ? 'border-emerald-300 ring-2 ring-emerald-100 shadow-md'
+                        : 'border-slate-200 hover:border-slate-300'
+                    )}
                   >
                     <div className="flex items-start justify-between gap-2">
                       <div className="flex items-center gap-2 min-w-0">
@@ -2145,7 +2799,7 @@ function RecoveryTaskDrawer({ open, onClose, onViewVerificationReport }: Recover
                           )}
                         </button>
                       </div>
-                      {getStatusBadge(task.status)}
+                      {getStatusBadge(task)}
                     </div>
 
                     <div className="flex flex-wrap items-center gap-2">
@@ -2185,27 +2839,13 @@ function RecoveryTaskDrawer({ open, onClose, onViewVerificationReport }: Recover
                       )}
                     </div>
 
+                    {renderProgress(task)}
+
                     <div className="flex items-center justify-between pt-1 border-t border-slate-50">
                       <span className="text-[11px] text-slate-400">
                         创建：{formatDateTime(task.createdAt)}
                       </span>
-                      <button
-                        onClick={() => {
-                          if (hasVerification) {
-                            onViewVerificationReport(task.id);
-                          }
-                        }}
-                        disabled={!hasVerification}
-                        className={cn(
-                          'inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-xs font-medium transition-all',
-                          hasVerification
-                            ? 'bg-primary-50 text-primary-700 hover:bg-primary-100 border border-primary-200'
-                            : 'bg-slate-50 text-slate-400 border border-slate-200 cursor-not-allowed'
-                        )}
-                      >
-                        <FileCheck className="h-3 w-3" />
-                        {hasVerification ? '查看校验报告' : '校验生成中...'}
-                      </button>
+                      {getReportButton(task)}
                     </div>
                   </div>
                 );

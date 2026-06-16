@@ -6,7 +6,7 @@ interface ProgressBarProps {
   label?: string;
   showValue?: boolean;
   variant?: 'primary' | 'success' | 'warning' | 'danger';
-  size?: 'sm' | 'md' | 'lg';
+  size?: 'xs' | 'sm' | 'md' | 'lg';
 }
 
 export default function ProgressBar({
@@ -28,6 +28,7 @@ export default function ProgressBar({
   };
 
   const sizeClasses: Record<string, { bar: string; text: string }> = {
+    xs: { bar: 'h-1', text: 'text-[10px]' },
     sm: { bar: 'h-1.5', text: 'text-xs' },
     md: { bar: 'h-2.5', text: 'text-sm' },
     lg: { bar: 'h-4', text: 'text-base' },

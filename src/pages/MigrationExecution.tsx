@@ -131,6 +131,9 @@ export default function MigrationExecution() {
   const [currentSpeed, setCurrentSpeed] = useState(12.5);
   const [toast, setToast] = useState<{ message: string; type: 'success' | 'info' | 'warning' } | null>(null);
   const [batchRetryLoading, setBatchRetryLoading] = useState(false);
+  const [batchSkipLoading, setBatchSkipLoading] = useState(false);
+  const [batchRetryTotal, setBatchRetryTotal] = useState(0);
+  const [batchRetryLocked, setBatchRetryLocked] = useState(0);
 
   useEffect(() => {
     if (storeSelectedTaskId && storeSelectedTaskId !== selectedTaskId) {
@@ -199,7 +202,7 @@ export default function MigrationExecution() {
   const selectableFilteredFiles = useMemo(() => {
     return filteredFailedFiles.filter((f) => {
       const s = f.processingStatus;
-      return s !== 'resolved' && s !== 'skipped';
+      return s !== 'processing' && s !== 'resolved';
     });
   }, [filteredFailedFiles]);
 
@@ -249,20 +252,50 @@ export default function MigrationExecution() {
 
   const batchRetrySelected = () => {
     const fileIds = Array.from(selectedIds);
-    if (fileIds.length > 0 && selectedTaskId) {
-      setBatchRetryLoading(true);
-      batchRetryFailedFiles(selectedTaskId, fileIds);
-      showToast(`已发起 ${fileIds.length} 个文件重试，日志已记录`, 'success');
-      setTimeout(() => setBatchRetryLoading(false), 2200);
+    if (fileIds.length === 0 || !selectedTaskId) return;
+    const lockedCount = batchRetryLoading ? batchRetryLocked : 0;
+    if (failedStats.processing > 0 && !batchRetryLoading) {
+      showToast(`有 ${failedStats.processing} 个文件处理中，请等待完成`, 'warning');
+      return;
+    }
+    setBatchRetryLoading(true);
+    const processed = batchRetryFailedFiles(selectedTaskId, fileIds);
+    const locked = processed;
+    setBatchRetryTotal(fileIds.length);
+    setBatchRetryLocked(locked);
+    if (locked > 0) {
+      showToast(`已锁定 ${locked} 个文件进入处理队列，避免重复操作，日志已记录`, 'success');
+    } else if (fileIds.length > 0) {
+      showToast(`选中的 ${fileIds.length} 个文件无法重试（已锁定或已处理）`, 'info');
     }
   };
 
+  useEffect(() => {
+    if (batchRetryLoading && failedStats.processing === 0) {
+      const timer = setTimeout(() => {
+        setBatchRetryLoading(false);
+        setBatchRetryTotal(0);
+        setBatchRetryLocked(0);
+      }, 600);
+      return () => clearTimeout(timer);
+    }
+  }, [failedStats.processing, batchRetryLoading]);
+
   const batchSkipSelected = () => {
     const fileIds = Array.from(selectedIds);
-    if (fileIds.length > 0 && selectedTaskId) {
-      batchSkipFiles(fileIds, selectedTaskId);
-      showToast(`已跳过 ${fileIds.length} 个文件`, 'warning');
+    if (fileIds.length === 0 || !selectedTaskId) return;
+    if (failedStats.processing > 0) {
+      showToast(`有 ${failedStats.processing} 个文件处理中，请等待完成`, 'warning');
+      return;
     }
+    setBatchSkipLoading(true);
+    const skipped = batchSkipFiles(fileIds, selectedTaskId);
+    if (skipped > 0) {
+      showToast(`已跳过 ${skipped} 个文件`, 'warning');
+    } else if (fileIds.length > 0) {
+      showToast(`选中的 ${fileIds.length} 个文件无法跳过（已锁定或已处理）`, 'info');
+    }
+    setTimeout(() => setBatchSkipLoading(false), 500);
   };
 
   const toggleSidebar = () => setSidebarCollapsed((v) => !v);
@@ -310,17 +343,17 @@ export default function MigrationExecution() {
       ),
       width: '40px',
       cell: (row) => {
-        const isResolved = row.processingStatus === 'resolved' || row.processingStatus === 'skipped';
+        const isLocked = row.processingStatus === 'processing' || row.processingStatus === 'resolved';
         return (
           <input
             type="checkbox"
             checked={selectedIds.has(row.id)}
-            disabled={isResolved}
-            onChange={() => currentTask && !isResolved && toggleFailedFileSelected(currentTask.id, row.id)}
+            disabled={isLocked}
+            onChange={() => currentTask && !isLocked && toggleFailedFileSelected(currentTask.id, row.id)}
             onClick={(e) => e.stopPropagation()}
             className={cn(
               'w-4 h-4 rounded border-slate-300 text-primary-600 focus:ring-primary-500',
-              isResolved && 'opacity-30 cursor-not-allowed'
+              isLocked && 'opacity-30 cursor-not-allowed'
             )}
           />
         );
@@ -440,12 +473,16 @@ export default function MigrationExecution() {
     {
       id: 'actions',
       header: '操作',
-      width: '200px',
+      width: '220px',
       align: 'right',
       cell: (row) => {
-        const isResolved = row.processingStatus === 'resolved' || row.processingStatus === 'skipped';
         const isProcessing = row.processingStatus === 'processing';
-        const canRetryNow = row.canRetry && !isResolved && !isProcessing;
+        const isResolved = row.processingStatus === 'resolved';
+        const isSkipped = row.processingStatus === 'skipped';
+        const isFinished = isResolved || isSkipped;
+        const canRetryNow = row.canRetry && !isFinished && !isProcessing;
+        const canSkipNow = !isFinished && !isProcessing;
+
         return (
           <div className="flex items-center justify-end gap-1">
             <button
@@ -456,23 +493,28 @@ export default function MigrationExecution() {
               disabled={!canRetryNow}
               className={cn(
                 'inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-xs font-medium transition-all',
-                canRetryNow
+                isProcessing
+                  ? 'text-slate-400 bg-slate-100 cursor-not-allowed'
+                  : isResolved
+                  ? 'text-emerald-500 bg-emerald-50 cursor-not-allowed opacity-60'
+                  : isSkipped
+                  ? 'text-amber-500 bg-amber-50 cursor-not-allowed opacity-60'
+                  : canRetryNow
                   ? 'text-primary-600 bg-primary-50 hover:bg-primary-100 hover:shadow-sm'
                   : 'text-slate-400 bg-slate-50 cursor-not-allowed'
               )}
             >
-              <RefreshCw className={cn('h-3.5 w-3.5', isProcessing && 'animate-spin')} />
-              重试
+              <Loader2
+                className={cn(
+                  'h-3.5 w-3.5',
+                  isProcessing && 'animate-spin'
+                )}
+              />
+              {isProcessing ? '处理中...' : isResolved ? '已完成' : isSkipped ? '已跳过' : '重试'}
             </button>
             <button
               onClick={(e) => e.stopPropagation()}
-              className={cn(
-                'inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-xs font-medium transition-all',
-                !isResolved
-                  ? 'text-slate-600 bg-slate-50 hover:bg-slate-100 hover:shadow-sm'
-                  : 'text-slate-400 bg-slate-50 cursor-not-allowed'
-              )}
-              disabled={isResolved}
+              className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-xs font-medium transition-all text-slate-600 bg-slate-50 hover:bg-slate-100 hover:shadow-sm"
             >
               <Eye className="h-3.5 w-3.5" />
               详情
@@ -480,18 +522,30 @@ export default function MigrationExecution() {
             <button
               onClick={(e) => {
                 e.stopPropagation();
-                if (!isResolved) skipFailedFile(row.id);
+                if (canSkipNow) skipFailedFile(row.id);
               }}
-              disabled={isResolved}
+              disabled={!canSkipNow}
               className={cn(
                 'inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-xs font-medium transition-all',
-                !isResolved
-                  ? 'text-amber-600 bg-amber-50 hover:bg-amber-100 hover:shadow-sm'
-                  : 'text-slate-400 bg-slate-50 cursor-not-allowed'
+                isProcessing
+                  ? 'text-slate-400 bg-slate-100 cursor-not-allowed'
+                  : isResolved
+                  ? 'text-emerald-500 bg-emerald-50 cursor-not-allowed opacity-60'
+                  : isSkipped
+                  ? 'text-amber-500 bg-amber-50 cursor-not-allowed opacity-60'
+                  : 'text-amber-600 bg-amber-50 hover:bg-amber-100 hover:shadow-sm'
               )}
             >
-              <SkipForward className="h-3.5 w-3.5" />
-              跳过
+              {isProcessing ? (
+                <Loader2 className="h-3.5 w-3.5 animate-spin" />
+              ) : isResolved ? (
+                <Check className="h-3.5 w-3.5" />
+              ) : isSkipped ? (
+                <SkipForward className="h-3.5 w-3.5" />
+              ) : (
+                <SkipForward className="h-3.5 w-3.5" />
+              )}
+              {isProcessing ? '处理中...' : isResolved ? '已完成' : isSkipped ? '已跳过' : '跳过'}
             </button>
           </div>
         );
@@ -717,15 +771,16 @@ export default function MigrationExecution() {
                       <div className="text-xs text-rose-600">失败中</div>
                       <button
                         onClick={() => retryAllFailedFiles(selectedTaskId)}
-                        disabled={retryableCount === 0}
+                        disabled={retryableCount === 0 || failedStats.processing > 0}
                         className={cn(
                           'inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-xs font-medium transition-all',
-                          retryableCount > 0
+                          retryableCount > 0 && failedStats.processing === 0
                             ? 'bg-rose-100 text-rose-700 hover:bg-rose-200'
                             : 'bg-slate-100 text-slate-400 cursor-not-allowed'
                         )}
+                        title={failedStats.processing > 0 ? `有 ${failedStats.processing} 个文件处理中，请等待完成` : retryableCount === 0 ? '暂无可重试文件' : '重试所有可重试文件'}
                       >
-                        <RefreshCw className="h-3 w-3" />
+                        <RefreshCw className={cn('h-3 w-3', failedStats.processing > 0 && 'animate-spin')} />
                         重试
                       </button>
                     </div>
@@ -931,39 +986,50 @@ export default function MigrationExecution() {
                 <div className="flex-1" />
                 <button
                   onClick={batchRetrySelected}
-                  disabled={selectedIds.size === 0 || batchRetryLoading}
+                  disabled={selectedIds.size === 0 || failedStats.processing > 0}
                   className={cn(
                     'inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium transition-all',
-                    selectedIds.size > 0 && !batchRetryLoading
+                    selectedIds.size > 0 && failedStats.processing === 0
                       ? 'bg-primary-600 text-white hover:bg-primary-700 shadow-sm shadow-primary-500/20'
-                      : 'bg-slate-100 text-slate-400 cursor-not-allowed'
+                      : 'bg-slate-100 text-slate-400 cursor-not-allowed',
+                    batchRetryLoading && 'opacity-70'
                   )}
+                  title={failedStats.processing > 0 ? `有 ${failedStats.processing} 个文件处理中，请等待完成` : selectedIds.size === 0 ? '请先选中要重试的文件' : ''}
                 >
                   <RefreshCw className={cn('h-3.5 w-3.5', batchRetryLoading && 'animate-spin')} />
-                  {batchRetryLoading ? '重试中...' : '批量重试选中'}
+                  {batchRetryLoading
+                    ? `重试中 ${batchRetryLocked - failedStats.processing}/${batchRetryLocked}...`
+                    : '批量重试选中'}
                 </button>
                 <button
                   onClick={batchSkipSelected}
-                  disabled={selectedIds.size === 0}
+                  disabled={selectedIds.size === 0 || failedStats.processing > 0 || batchSkipLoading}
                   className={cn(
                     'inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium transition-all',
-                    selectedIds.size > 0
+                    selectedIds.size > 0 && failedStats.processing === 0 && !batchSkipLoading
                       ? 'bg-amber-500 text-white hover:bg-amber-600 shadow-sm shadow-amber-500/20'
-                      : 'bg-slate-100 text-slate-400 cursor-not-allowed'
+                      : 'bg-slate-100 text-slate-400 cursor-not-allowed',
+                    batchSkipLoading && 'opacity-70'
                   )}
+                  title={failedStats.processing > 0 ? `有 ${failedStats.processing} 个文件处理中，请等待完成` : selectedIds.size === 0 ? '请先选中要跳过的文件' : ''}
                 >
-                  <SkipForward className="h-3.5 w-3.5" />
-                  跳过选中文件
+                  {batchSkipLoading ? (
+                    <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                  ) : (
+                    <SkipForward className="h-3.5 w-3.5" />
+                  )}
+                  {batchSkipLoading ? '跳过中...' : '跳过选中文件'}
                 </button>
                 <button
                   onClick={() => retryAllFailedFiles(selectedTaskId)}
-                  disabled={failedStats.retryable === 0}
+                  disabled={failedStats.retryable === 0 || failedStats.processing > 0}
                   className={cn(
                     'inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium transition-all',
-                    failedStats.retryable > 0
+                    failedStats.retryable > 0 && failedStats.processing === 0
                       ? 'bg-emerald-500 text-white hover:bg-emerald-600 shadow-sm shadow-emerald-500/20'
                       : 'bg-slate-100 text-slate-400 cursor-not-allowed'
                   )}
+                  title={failedStats.processing > 0 ? `有 ${failedStats.processing} 个文件处理中，请等待完成` : failedStats.retryable === 0 ? '暂无可重试文件' : ''}
                 >
                   <RefreshCw className="h-3.5 w-3.5" />
                   重试全部可重试
@@ -990,10 +1056,16 @@ export default function MigrationExecution() {
                   emptyMessage="当前分类下暂无失败文件"
                   getRowClassName={(row: FailedFile) => {
                     const s = row.processingStatus;
-                    if (s === 'resolved' || s === 'skipped') {
-                      return 'bg-slate-50/80 opacity-80 hover:!bg-slate-100/80';
+                    if (s === 'processing') {
+                      return 'border-l-4 border-primary-400 bg-primary-50/30';
                     }
-                    return undefined;
+                    if (s === 'resolved') {
+                      return 'border-l-4 border-emerald-300 bg-slate-50/80 opacity-80';
+                    }
+                    if (s === 'skipped') {
+                      return 'border-l-4 border-amber-300 bg-slate-50/80 opacity-80';
+                    }
+                    return 'border-l-4 border-transparent';
                   }}
                 />
               </div>
@@ -1067,15 +1139,15 @@ export default function MigrationExecution() {
         <div className="fixed bottom-6 left-1/2 -translate-x-1/2 z-50 animate-[fadeIn_0.2s_ease-out]">
           <div
             className={cn(
-              'inline-flex items-center gap-2 px-5 py-3 rounded-xl shadow-lg shadow-black/10 border text-sm font-medium',
-              toast.type === 'success' && 'bg-emerald-50 border-emerald-200 text-emerald-700',
-              toast.type === 'warning' && 'bg-amber-50 border-amber-200 text-amber-700',
-              toast.type === 'info' && 'bg-sky-50 border-sky-200 text-sky-700'
+              'inline-flex items-center gap-2 px-5 py-3 rounded-xl shadow-lg shadow-black/10 border-2 text-sm font-medium backdrop-blur-sm',
+              toast.type === 'success' && 'bg-emerald-50/90 border-primary-300/60 text-emerald-700 shadow-primary-500/10',
+              toast.type === 'warning' && 'bg-amber-50/90 border-primary-300/60 text-amber-700 shadow-primary-500/10',
+              toast.type === 'info' && 'bg-sky-50/90 border-primary-300/60 text-sky-700 shadow-primary-500/10'
             )}
           >
-            {toast.type === 'success' && <Check className="h-4 w-4" />}
-            {toast.type === 'warning' && <SkipForward className="h-4 w-4" />}
-            {toast.type === 'info' && <Activity className="h-4 w-4" />}
+            {toast.type === 'success' && <Check className="h-4 w-4 text-emerald-500" />}
+            {toast.type === 'warning' && <SkipForward className="h-4 w-4 text-amber-500" />}
+            {toast.type === 'info' && <Activity className="h-4 w-4 text-sky-500" />}
             {toast.message}
           </div>
         </div>

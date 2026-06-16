@@ -153,19 +153,36 @@ export interface VerificationDetail {
   sizeMatch: boolean;
 }
 
+export interface VerificationFileDetail {
+  id?: string;
+  fileName: string;
+  filePath: string;
+  size?: string;
+  sizeBytes?: number;
+  sourceChecksum: string;
+  targetChecksum: string;
+  passed: boolean;
+  failedReason?: string;
+  algorithm?: 'md5' | 'sha1' | 'sha256';
+}
+
 export interface VerificationResult {
   id: string;
   taskId: string;
+  taskName: string;
   name: string;
   status: 'passed' | 'failed' | 'partial';
   totalFiles: number;
   verifiedFiles: number;
   passedFiles: number;
   failedFiles: number;
+  successRate: number;
   startTime: string;
   endTime: string;
+  createdAt: string;
   details: VerificationDetail[];
   type?: 'migration' | 'recovery';
+  fileDetails?: VerificationFileDetail[];
 }
 
 export const currentOperator: Operator = {
@@ -590,18 +607,111 @@ export const notifications: Notification[] = [
   { id: 'nf-008', userId: 'op-001', title: '每周备份执行成功', message: '备份计划【客户资料每周全量备份】在 2026-06-14 的备份任务成功完成。备份大小：128.7GB。', type: 'success', read: true, relatedId: 'bv-005', relatedType: 'backup_version', createdAt: '2026-06-15T02:18:30+08:00' }
 ];
 
+export interface RecoveryTask {
+  id: string;
+  name: string;
+  versionId: string;
+  targetId: string;
+  targetPath: string;
+  fileIds?: string[];
+  priority: 'low' | 'normal' | 'high' | 'urgent';
+  status: 'pending' | 'running' | 'completed' | 'failed';
+  progress: number;
+  totalFiles: number;
+  processedFiles: number;
+  totalSize: string;
+  totalSizeBytes?: number;
+  processedSize: string;
+  overwriteExisting: boolean;
+  startedAt?: string;
+  estimatedEndAt?: string;
+  speedBytesPerSec?: number;
+  relatedVerificationId?: string;
+  completedAt?: string;
+  createdAt: string;
+  createdBy: string;
+  errorMessage?: string;
+}
+
+export const recoveryTasks: RecoveryTask[] = [
+  {
+    id: 'rt-001',
+    name: '恢复 2026.06.16-daily 至 原路径',
+    versionId: 'bv-001',
+    targetId: 'tl-001',
+    targetPath: '\\\\nas01.company.local\\archive',
+    priority: 'high',
+    status: 'completed',
+    progress: 100,
+    totalFiles: 458,
+    processedFiles: 458,
+    totalSize: '2.3 GB',
+    totalSizeBytes: 2469606195,
+    processedSize: '2.3 GB',
+    overwriteExisting: true,
+    startedAt: '2026-06-16T10:00:00+08:00',
+    completedAt: '2026-06-16T10:03:42+08:00',
+    speedBytesPerSec: 105 * 1024 * 1024,
+    relatedVerificationId: 'vr-003',
+    createdAt: '2026-06-16T09:58:00+08:00',
+    createdBy: '张明'
+  },
+  {
+    id: 'rt-002',
+    name: '恢复 2026.06.14-weekly 至 子目录',
+    versionId: 'bv-005',
+    targetId: 'tl-002',
+    targetPath: 's3://company-archive-bucket/recovery_2026.06.14-weekly_2026-06-15',
+    priority: 'normal',
+    status: 'completed',
+    progress: 100,
+    totalFiles: 34210,
+    processedFiles: 34210,
+    totalSize: '128.7 GB',
+    totalSizeBytes: 138189582336,
+    processedSize: '128.7 GB',
+    overwriteExisting: false,
+    startedAt: '2026-06-15T14:30:00+08:00',
+    completedAt: '2026-06-15T15:08:25+08:00',
+    speedBytesPerSec: 58 * 1024 * 1024,
+    createdAt: '2026-06-15T14:28:00+08:00',
+    createdBy: '张明'
+  },
+  {
+    id: 'rt-003',
+    name: '恢复 2026.06.10-daily 至 指定路径',
+    versionId: 'bv-009',
+    targetId: 'tl-003',
+    targetPath: '/cold-backup/temp_recovery_20260610',
+    priority: 'low',
+    status: 'pending',
+    progress: 0,
+    totalFiles: 1250,
+    processedFiles: 0,
+    totalSize: '8.5 GB',
+    totalSizeBytes: 9126805504,
+    processedSize: '0 B',
+    overwriteExisting: false,
+    createdAt: '2026-06-16T09:45:00+08:00',
+    createdBy: '张明'
+  }
+];
+
 export const verificationResults: VerificationResult[] = [
   {
     id: 'vr-001',
     taskId: 'mt-001',
+    taskName: '财务文档月度归档-2024Q2',
     name: '财务文档月度归档-数据完整性校验',
     status: 'passed',
     totalFiles: 2448,
     verifiedFiles: 2448,
     passedFiles: 2448,
     failedFiles: 0,
+    successRate: 100.0,
     startTime: '2026-06-01T03:00:00+08:00',
     endTime: '2026-06-01T03:08:45+08:00',
+    createdAt: '2026-06-01T03:08:45+08:00',
     type: 'migration',
     details: [
       { id: 'vd-001', fileName: 'report_q1.xlsx', expectedHash: 'a1b2c3d4e5f60001', actualHash: 'a1b2c3d4e5f60001', status: 'passed', sizeMatch: true },
@@ -609,19 +719,32 @@ export const verificationResults: VerificationResult[] = [
       { id: 'vd-003', fileName: 'budget_2026.xlsx', expectedHash: 'c3d4e5f6a1b20003', actualHash: 'c3d4e5f6a1b20003', status: 'passed', sizeMatch: true },
       { id: 'vd-004', fileName: 'expense_apr.docx', expectedHash: 'd4e5f6a1b2c30004', actualHash: 'd4e5f6a1b2c30004', status: 'passed', sizeMatch: true },
       { id: 'vd-005', fileName: 'tax_return.pdf', expectedHash: 'e5f6a1b2c3d40005', actualHash: 'e5f6a1b2c3d40005', status: 'passed', sizeMatch: true }
+    ],
+    fileDetails: [
+      { id: 'vfd-001', fileName: 'report_q1.xlsx', filePath: '/finance/reports/2026/q1/report_q1.xlsx', size: '2.4 MB', sizeBytes: 2516582, sourceChecksum: 'a1b2c3d4e5f60001', targetChecksum: 'a1b2c3d4e5f60001', passed: true, algorithm: 'md5' },
+      { id: 'vfd-002', fileName: 'invoice_may.pdf', filePath: '/finance/invoices/2026/05/invoice_may.pdf', size: '8.7 MB', sizeBytes: 9122611, sourceChecksum: 'b2c3d4e5f6a10002', targetChecksum: 'b2c3d4e5f6a10002', passed: true, algorithm: 'md5' },
+      { id: 'vfd-003', fileName: 'budget_2026.xlsx', filePath: '/finance/budget/2026/budget_2026.xlsx', size: '15.2 MB', sizeBytes: 15938355, sourceChecksum: 'c3d4e5f6a1b20003', targetChecksum: 'c3d4e5f6a1b20003', passed: true, algorithm: 'md5' },
+      { id: 'vfd-004', fileName: 'expense_apr.docx', filePath: '/finance/expenses/2026/04/expense_apr.docx', size: '1.8 MB', sizeBytes: 1887436, sourceChecksum: 'd4e5f6a1b2c30004', targetChecksum: 'd4e5f6a1b2c30004', passed: true, algorithm: 'md5' },
+      { id: 'vfd-005', fileName: 'tax_return.pdf', filePath: '/finance/tax/2026/tax_return.pdf', size: '22.5 MB', sizeBytes: 23592960, sourceChecksum: 'e5f6a1b2c3d40005', targetChecksum: 'e5f6a1b2c3d40005', passed: true, algorithm: 'md5' },
+      { id: 'vfd-006', fileName: 'profit_loss_mar.xlsx', filePath: '/finance/reports/2026/03/profit_loss_mar.xlsx', size: '3.6 MB', sizeBytes: 3774873, sourceChecksum: 'f6a1b2c3d4e50006', targetChecksum: 'f6a1b2c3d4e50006', passed: true, algorithm: 'md5' },
+      { id: 'vfd-007', fileName: 'balance_sheet_feb.xlsx', filePath: '/finance/reports/2026/02/balance_sheet_feb.xlsx', size: '4.2 MB', sizeBytes: 4404019, sourceChecksum: 'a1b2c3f6e5d40007', targetChecksum: 'a1b2c3f6e5d40007', passed: true, algorithm: 'md5' },
+      { id: 'vfd-008', fileName: 'cash_flow_jan.xlsx', filePath: '/finance/reports/2026/01/cash_flow_jan.xlsx', size: '2.9 MB', sizeBytes: 3040870, sourceChecksum: 'b2c3d4a1f6e50008', targetChecksum: 'b2c3d4a1f6e50008', passed: true, algorithm: 'md5' }
     ]
   },
   {
     id: 'vr-002',
     taskId: 'mt-007',
+    taskName: '历史客户数据清理迁移',
     name: '历史客户数据清理迁移-数据完整性校验',
     status: 'partial',
     totalFiles: 8492,
     verifiedFiles: 8492,
     passedFiles: 8489,
     failedFiles: 3,
+    successRate: 99.96,
     startTime: '2026-06-11T05:00:00+08:00',
     endTime: '2026-06-11T05:42:20+08:00',
+    createdAt: '2026-06-11T05:42:20+08:00',
     type: 'migration',
     details: [
       { id: 'vd-006', fileName: 'customer_0001.json', expectedHash: 'f6a1b2c3d4e50006', actualHash: 'f6a1b2c3d4e50006', status: 'passed', sizeMatch: true },
@@ -631,19 +754,34 @@ export const verificationResults: VerificationResult[] = [
       { id: 'vd-010', fileName: 'customer_3300.json', expectedHash: 'd4f6e5b2a1c30010', actualHash: 'd4f6e5b2a1c30010', status: 'passed', sizeMatch: true },
       { id: 'vd-011', fileName: 'customer_4500.json', expectedHash: 'e5a1b2c3d4f60011', actualHash: 'e5a1b2c3d4f60111', status: 'failed', sizeMatch: true },
       { id: 'vd-012', fileName: 'customer_5800.json', expectedHash: 'f6e5d4c3b2a10012', actualHash: 'f6e5d4c3b2a10012', status: 'passed', sizeMatch: true }
+    ],
+    fileDetails: [
+      { id: 'vfd-009', fileName: 'customer_0001.json', filePath: '/crm/customers/2020/customer_0001.json', size: '45.2 KB', sizeBytes: 46285, sourceChecksum: 'f6a1b2c3d4e50006', targetChecksum: 'f6a1b2c3d4e50006', passed: true, algorithm: 'sha256' },
+      { id: 'vfd-010', fileName: 'customer_0892.json', filePath: '/crm/customers/2021/customer_0892.json', size: '52.8 KB', sizeBytes: 54067, sourceChecksum: 'a1b2c3f6e5d40007', targetChecksum: 'b2c3d4a1f6e50077', passed: false, failedReason: '校验值不匹配', algorithm: 'sha256' },
+      { id: 'vfd-011', fileName: 'customer_1250.json', filePath: '/crm/customers/2021/customer_1250.json', size: '48.1 KB', sizeBytes: 49254, sourceChecksum: 'b2c3d4a1f6e50008', targetChecksum: 'b2c3d4a1f6e50008', passed: true, algorithm: 'sha256' },
+      { id: 'vfd-012', fileName: 'customer_2100.json', filePath: '/crm/customers/2022/customer_2100.json', size: '61.3 KB', sizeBytes: 62771, sourceChecksum: 'c3d4f6e5a1b20009', targetChecksum: 'c3d4f6e5a1b20099', passed: false, failedReason: '文件大小不匹配', algorithm: 'sha256' },
+      { id: 'vfd-013', fileName: 'customer_3300.json', filePath: '/crm/customers/2022/customer_3300.json', size: '55.7 KB', sizeBytes: 57037, sourceChecksum: 'd4f6e5b2a1c30010', targetChecksum: 'd4f6e5b2a1c30010', passed: true, algorithm: 'sha256' },
+      { id: 'vfd-014', fileName: 'customer_4500.json', filePath: '/crm/customers/2023/customer_4500.json', size: '49.6 KB', sizeBytes: 50790, sourceChecksum: 'e5a1b2c3d4f60011', targetChecksum: 'e5a1b2c3d4f60111', passed: false, failedReason: '校验值不匹配', algorithm: 'sha256' },
+      { id: 'vfd-015', fileName: 'customer_5800.json', filePath: '/crm/customers/2023/customer_5800.json', size: '47.3 KB', sizeBytes: 48435, sourceChecksum: 'f6e5d4c3b2a10012', targetChecksum: 'f6e5d4c3b2a10012', passed: true, algorithm: 'sha256' },
+      { id: 'vfd-016', fileName: 'customer_6200.json', filePath: '/crm/customers/2024/customer_6200.json', size: '53.4 KB', sizeBytes: 54682, sourceChecksum: 'a1b2c3d4f6e50013', targetChecksum: 'a1b2c3d4f6e50013', passed: true, algorithm: 'sha256' },
+      { id: 'vfd-017', fileName: 'customer_7100.json', filePath: '/crm/customers/2024/customer_7100.json', size: '46.9 KB', sizeBytes: 48026, sourceChecksum: 'b2c3d4e5a1f60014', targetChecksum: 'b2c3d4e5a1f60014', passed: true, algorithm: 'sha256' },
+      { id: 'vfd-018', fileName: 'customer_8200.json', filePath: '/crm/customers/2025/customer_8200.json', size: '58.2 KB', sizeBytes: 59597, sourceChecksum: 'c3d4e5f6b2a10015', targetChecksum: 'c3d4e5f6b2a10015', passed: true, algorithm: 'sha256' }
     ]
   },
   {
     id: 'vr-003',
     taskId: 'bs-001',
+    taskName: '财务数据备份恢复',
     name: '财务数据备份-版本校验',
     status: 'passed',
     totalFiles: 12580,
     verifiedFiles: 500,
     passedFiles: 500,
     failedFiles: 0,
+    successRate: 100.0,
     startTime: '2026-06-14T03:30:00+08:00',
     endTime: '2026-06-14T03:55:10+08:00',
+    createdAt: '2026-06-14T03:55:10+08:00',
     type: 'recovery',
     details: [
       { id: 'vd-013', fileName: 'balance_sheet.xlsx', expectedHash: '001a1b2c3d4e5f60', actualHash: '001a1b2c3d4e5f60', status: 'passed', sizeMatch: true },
@@ -652,6 +790,15 @@ export const verificationResults: VerificationResult[] = [
       { id: 'vd-016', fileName: 'accounts_receivable.xlsx', expectedHash: '004d4e5f6a1b2c30', actualHash: '004d4e5f6a1b2c30', status: 'passed', sizeMatch: true },
       { id: 'vd-017', fileName: 'general_ledger_2026.csv', expectedHash: '005e5f6a1b2c3d40', actualHash: '005e5f6a1b2c3d40', status: 'passed', sizeMatch: true },
       { id: 'vd-018', fileName: 'fixed_assets.xlsx', expectedHash: '006f6a1b2c3d4e50', actualHash: '006f6a1b2c3d4e50', status: 'passed', sizeMatch: true }
+    ],
+    fileDetails: [
+      { id: 'vfd-019', fileName: 'balance_sheet.xlsx', filePath: '/backup/2026.06.14-daily/finance/balance_sheet.xlsx', size: '6.8 MB', sizeBytes: 7130316, sourceChecksum: '001a1b2c3d4e5f60', targetChecksum: '001a1b2c3d4e5f60', passed: true, algorithm: 'sha256' },
+      { id: 'vfd-020', fileName: 'income_statement.xlsx', filePath: '/backup/2026.06.14-daily/finance/income_statement.xlsx', size: '5.2 MB', sizeBytes: 5452595, sourceChecksum: '002b2c3d4e5f6a10', targetChecksum: '002b2c3d4e5f6a10', passed: true, algorithm: 'sha256' },
+      { id: 'vfd-021', fileName: 'cash_flow.pdf', filePath: '/backup/2026.06.14-daily/finance/cash_flow.pdf', size: '12.4 MB', sizeBytes: 13002342, sourceChecksum: '003c3d4e5f6a1b20', targetChecksum: '003c3d4e5f6a1b20', passed: true, algorithm: 'sha256' },
+      { id: 'vfd-022', fileName: 'accounts_receivable.xlsx', filePath: '/backup/2026.06.14-daily/finance/accounts_receivable.xlsx', size: '8.9 MB', sizeBytes: 9332326, sourceChecksum: '004d4e5f6a1b2c30', targetChecksum: '004d4e5f6a1b2c30', passed: true, algorithm: 'sha256' },
+      { id: 'vfd-023', fileName: 'general_ledger_2026.csv', filePath: '/backup/2026.06.14-daily/finance/general_ledger_2026.csv', size: '45.8 MB', sizeBytes: 48024883, sourceChecksum: '005e5f6a1b2c3d40', targetChecksum: '005e5f6a1b2c3d40', passed: true, algorithm: 'sha256' },
+      { id: 'vfd-024', fileName: 'fixed_assets.xlsx', filePath: '/backup/2026.06.14-daily/finance/fixed_assets.xlsx', size: '3.6 MB', sizeBytes: 3774873, sourceChecksum: '006f6a1b2c3d4e50', targetChecksum: '006f6a1b2c3d4e50', passed: true, algorithm: 'sha256' },
+      { id: 'vfd-025', fileName: 'voucher_jun.xlsx', filePath: '/backup/2026.06.14-daily/finance/voucher_jun.xlsx', size: '18.2 MB', sizeBytes: 19084083, sourceChecksum: '007a1b2c3d4e5f61', targetChecksum: '007a1b2c3d4e5f61', passed: true, algorithm: 'sha256' }
     ]
   }
 ];
