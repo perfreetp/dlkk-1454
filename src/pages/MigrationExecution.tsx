@@ -1,4 +1,5 @@
-import { useState, useEffect, useMemo } from 'react';
+import { useState, useEffect, useMemo, useRef } from 'react';
+import { useLocation } from 'react-router-dom';
 import {
   Play,
   Pause,
@@ -104,6 +105,9 @@ const INITIAL_LOGS: LogEntry[] = [
 ];
 
 export default function MigrationExecution() {
+  const location = useLocation();
+  const locationState = location.state as { taskId?: string; failedFileId?: string } | null;
+
   const {
     migrationTasks,
     failedFiles,
@@ -124,7 +128,7 @@ export default function MigrationExecution() {
     getTaskFailedStats,
   } = useAppStore();
 
-  const initialTaskId = storeSelectedTaskId || migrationTasks[0]?.id || 'mt-002';
+  const initialTaskId = locationState?.taskId || storeSelectedTaskId || migrationTasks[0]?.id || 'mt-002';
   const [selectedTaskId, setLocalSelectedTaskId] = useState<string>(initialTaskId);
   const [failedTab, setFailedTab] = useState<FailedTab>('all');
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
@@ -134,12 +138,35 @@ export default function MigrationExecution() {
   const [batchSkipLoading, setBatchSkipLoading] = useState(false);
   const [batchRetryTotal, setBatchRetryTotal] = useState(0);
   const [batchRetryLocked, setBatchRetryLocked] = useState(0);
+  const [highlightedFailedFileId, setHighlightedFailedFileId] = useState<string | null>(null);
+  const failedFileScrollRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
     if (storeSelectedTaskId && storeSelectedTaskId !== selectedTaskId) {
       setLocalSelectedTaskId(storeSelectedTaskId);
     }
   }, [storeSelectedTaskId]);
+
+  useEffect(() => {
+    if (locationState?.taskId) {
+      const exists = migrationTasks.some((t) => t.id === locationState.taskId);
+      if (exists) {
+        setLocalSelectedTaskId(locationState.taskId);
+        setSelectedTaskId(locationState.taskId);
+        clearFailedFilesSelection(locationState.taskId);
+      }
+    }
+    if (locationState?.failedFileId) {
+      setHighlightedFailedFileId(locationState.failedFileId);
+      setTimeout(() => {
+        const el = document.getElementById(`failed-file-${locationState.failedFileId}`);
+        if (el) {
+          el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        }
+        setTimeout(() => setHighlightedFailedFileId(null), 4000);
+      }, 300);
+    }
+  }, [locationState?.taskId, locationState?.failedFileId]);
 
   const showToast = (message: string, type: 'success' | 'info' | 'warning' = 'info') => {
     setToast({ message, type });
@@ -390,13 +417,15 @@ export default function MigrationExecution() {
       cell: (row) => {
         const isProcessing = row.processingStatus === 'processing';
         const isResolved = row.processingStatus === 'resolved' || row.processingStatus === 'skipped';
+        const isHighlighted = highlightedFailedFileId === row.id;
         return (
-          <div className="group relative">
+          <div id={`failed-file-${row.id}`} className={cn('group relative -mx-2 px-2 py-1 rounded-md transition-all', isHighlighted && 'bg-primary-50 ring-2 ring-primary-300 shadow-sm')}>
             <div className={cn('flex items-center gap-1.5', isResolved && 'text-slate-400')}>
               <div className={cn('font-medium truncate max-w-xs', !isResolved ? 'text-slate-800' : 'line-through')}>
                 {row.fileName}
               </div>
               {isProcessing && <Loader2 className="h-3.5 w-3.5 text-sky-500 animate-spin flex-shrink-0" />}
+              {isHighlighted && <span className="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-semibold bg-primary-500 text-white shrink-0">定位</span>}
             </div>
             <div className="text-xs text-slate-400 truncate max-w-xs">{row.filePath}</div>
             <div className="absolute z-20 left-0 top-full mt-1 px-3 py-2 bg-slate-800 text-white text-xs rounded-lg opacity-0 invisible group-hover:opacity-100 group-hover:visible transition-all whitespace-nowrap shadow-xl pointer-events-none">

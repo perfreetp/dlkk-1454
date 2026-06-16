@@ -1,5 +1,5 @@
 import { useState, useMemo } from 'react';
-import { Link } from 'react-router-dom';
+import { Link, useNavigate } from 'react-router-dom';
 import {
   Download,
   RotateCcw,
@@ -30,6 +30,7 @@ import type { AuditLog } from '@/data/mockData';
 
 type QuickDate = 'today' | 'yesterday' | '7d' | '30d' | 'custom' | null;
 type LogLevelUI = 'INFO' | 'SUCCESS' | 'WARNING' | 'ERROR' | 'CRITICAL';
+type RelationFilter = 'all' | 'recovery' | 'verification' | 'migration' | 'failed';
 
 const LEVEL_UI_MAP: Record<string, LogLevelUI> = {
   info: 'INFO',
@@ -150,6 +151,7 @@ function mapActionToGroup(action: string, actionType: string): string | null {
 
 export default function LogAudit() {
   const { auditLogs } = useAppStore();
+  const navigate = useNavigate();
 
   const [quickDate, setQuickDate] = useState<QuickDate>('7d');
   const [fromDate, setFromDate] = useState('');
@@ -157,6 +159,7 @@ export default function LogAudit() {
   const [selectedOperators, setSelectedOperators] = useState<string[]>([]);
   const [selectedActionTypes, setSelectedActionTypes] = useState<string[]>([]);
   const [selectedLevels, setSelectedLevels] = useState<LogLevelUI[]>([]);
+  const [relationFilter, setRelationFilter] = useState<RelationFilter>('all');
   const [keyword, setKeyword] = useState('');
   const [currentPage, setCurrentPage] = useState(1);
   const [selectedLog, setSelectedLog] = useState<AuditLog | null>(null);
@@ -240,6 +243,23 @@ export default function LogAudit() {
       });
     }
 
+    if (relationFilter !== 'all') {
+      logs = logs.filter((l) => {
+        switch (relationFilter) {
+          case 'recovery':
+            return !!l.recoveryTaskId;
+          case 'verification':
+            return !!l.verificationId;
+          case 'migration':
+            return !!l.migrationTaskId;
+          case 'failed':
+            return !!l.failedFileId;
+          default:
+            return true;
+        }
+      });
+    }
+
     if (keyword.trim()) {
       const kw = keyword.toLowerCase();
       logs = logs.filter(
@@ -252,7 +272,7 @@ export default function LogAudit() {
     }
 
     return logs.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
-  }, [auditLogs, dateRange, selectedOperators, selectedActionTypes, selectedLevels, keyword]);
+  }, [auditLogs, dateRange, selectedOperators, selectedActionTypes, selectedLevels, relationFilter, keyword]);
 
   const stats = useMemo(() => {
     const total = auditLogs.length;
@@ -288,6 +308,7 @@ export default function LogAudit() {
     setSelectedOperators([]);
     setSelectedActionTypes([]);
     setSelectedLevels([]);
+    setRelationFilter('all');
     setKeyword('');
     setCurrentPage(1);
   };
@@ -390,20 +411,85 @@ export default function LogAudit() {
   };
 
   const renderActionBadge = (action: string, actionType: string) => {
-    const colorMap: Record<string, string> = {
-      create: 'bg-emerald-50 text-emerald-700 border-emerald-200',
-      update: 'bg-sky-50 text-sky-700 border-sky-200',
-      delete: 'bg-rose-50 text-rose-700 border-rose-200',
-      execute: 'bg-primary-50 text-primary-700 border-primary-200',
-      login: 'bg-purple-50 text-purple-700 border-purple-200',
-      logout: 'bg-slate-50 text-slate-700 border-slate-200',
-      download: 'bg-indigo-50 text-indigo-700 border-indigo-200',
-    };
-    const cls = colorMap[actionType] || colorMap.execute;
+    const isCreate = actionType === 'create' || /发起|新建|创建/.test(action);
+    const isUpdate = actionType === 'update' || /启停|暂停|继续|更新|修改/.test(action);
+    const isDelete = actionType === 'delete' || /取消|删除/.test(action);
+    const isDownload = actionType === 'download' || /导出|下载/.test(action);
+    const isGenerate = /生成|完成/.test(action);
+
+    let cls = 'bg-primary-50 text-primary-700 border-primary-200';
+    if (isCreate) cls = 'bg-primary-50 text-primary-700 border-primary-200';
+    else if (isUpdate) cls = 'bg-amber-50 text-amber-700 border-amber-200';
+    else if (isDelete) cls = 'bg-rose-50 text-rose-700 border-rose-200';
+    else if (isDownload) cls = 'bg-sky-50 text-sky-700 border-sky-200';
+    else if (isGenerate) cls = 'bg-emerald-50 text-emerald-700 border-emerald-200';
+    else if (actionType === 'login') cls = 'bg-purple-50 text-purple-700 border-purple-200';
+    else if (actionType === 'logout') cls = 'bg-slate-50 text-slate-700 border-slate-200';
+
     return (
       <span className={cn('inline-flex px-2.5 py-1 rounded-md text-xs font-medium border', cls)}>
         {action}
       </span>
+    );
+  };
+
+  const handleJumpClick = (row: AuditLog, e: React.MouseEvent) => {
+    e.stopPropagation();
+    if (row.verificationId) {
+      navigate('/recovery', {
+        state: {
+          defaultTab: 'verification',
+          highlightVrId: row.verificationId,
+        },
+      });
+    } else if (row.recoveryTaskId) {
+      navigate('/recovery', {
+        state: {
+          openDrawer: true,
+          highlightTaskId: row.recoveryTaskId,
+        },
+      });
+    } else if (row.migrationTaskId) {
+      navigate('/execution', {
+        state: {
+          taskId: row.migrationTaskId,
+          failedFileId: row.failedFileId,
+        },
+      });
+    } else if (row.failedFileId) {
+      const taskForFile = auditLogs.find((l) => l.failedFileId === row.failedFileId && l.migrationTaskId);
+      navigate('/execution', {
+        state: {
+          taskId: taskForFile?.migrationTaskId,
+          failedFileId: row.failedFileId,
+        },
+      });
+    }
+  };
+
+  const renderJumpButton = (row: AuditLog) => {
+    const btns: { key: string; label: string; field: string }[] = [];
+    if (row.verificationId) btns.push({ key: 'v', label: '查看校验报告', field: 'verificationId' });
+    if (row.recoveryTaskId) btns.push({ key: 'r', label: '查看恢复任务', field: 'recoveryTaskId' });
+    if (row.migrationTaskId && !row.failedFileId) btns.push({ key: 'm', label: '查看迁移任务', field: 'migrationTaskId' });
+    if (row.failedFileId) btns.push({ key: 'f', label: '定位失败文件', field: 'failedFileId' });
+
+    if (btns.length === 0) return <span className="text-xs text-slate-300">-</span>;
+
+    return (
+      <div className="flex flex-col items-end gap-1">
+        {btns.slice(0, 2).map((b) => (
+          <button
+            key={b.key}
+            onClick={(e) => handleJumpClick(row, e)}
+            className="inline-flex items-center gap-1 px-2 py-1 text-xs text-slate-500 hover:text-primary-600 hover:bg-slate-50 rounded-md transition-colors"
+            title={b.label}
+          >
+            <ExternalLink className="h-3 w-3" />
+            {b.label}
+          </button>
+        ))}
+      </div>
     );
   };
 
@@ -509,6 +595,13 @@ export default function LogAudit() {
         );
       },
       width: '110px',
+    },
+    {
+      id: 'jump',
+      header: '快速跳转',
+      align: 'right',
+      cell: (row) => renderJumpButton(row),
+      width: '150px',
     },
     {
       id: 'ops',
@@ -744,6 +837,35 @@ export default function LogAudit() {
                   </div>
                 </div>
               ))}
+            </div>
+          </div>
+
+          <div className="col-span-12">
+            <label className="block text-xs font-medium text-slate-600 mb-2">关联类型筛选</label>
+            <div className="inline-flex items-center bg-slate-100 rounded-lg p-1 gap-0.5">
+              {([
+                { value: 'all', label: '全部' },
+                { value: 'recovery', label: '恢复任务' },
+                { value: 'verification', label: '校验报告' },
+                { value: 'migration', label: '迁移任务' },
+                { value: 'failed', label: '失败文件' },
+              ] as { value: RelationFilter; label: string }[]).map((opt) => {
+                const active = relationFilter === opt.value;
+                return (
+                  <button
+                    key={opt.value}
+                    onClick={() => setRelationFilter(opt.value)}
+                    className={cn(
+                      'px-4 py-1.5 rounded-md text-xs font-medium transition-all',
+                      active
+                        ? 'bg-white text-primary-700 shadow-sm'
+                        : 'text-slate-600 hover:text-slate-800'
+                    )}
+                  >
+                    {opt.label}
+                  </button>
+                );
+              })}
             </div>
           </div>
 
@@ -1029,14 +1151,17 @@ Caused by: S3ConnectionError: Access key expired
                     </>
                   )}
                 </button>
-                {selectedLog.targetType === 'migration_task' && (
-                  <Link
-                    to="/execution"
+                {(selectedLog.verificationId || selectedLog.recoveryTaskId || selectedLog.migrationTaskId || selectedLog.failedFileId) && (
+                  <button
+                    onClick={(e) => handleJumpClick(selectedLog, e)}
                     className="flex-1 inline-flex items-center justify-center gap-1.5 px-4 py-2.5 rounded-lg text-sm font-medium text-white bg-primary-600 hover:bg-primary-700 shadow-sm transition-all"
                   >
                     <ExternalLink className="h-4 w-4" />
-                    相关任务跳转
-                  </Link>
+                    {selectedLog.verificationId && '查看校验报告'}
+                    {!selectedLog.verificationId && selectedLog.recoveryTaskId && '查看恢复任务'}
+                    {!selectedLog.verificationId && !selectedLog.recoveryTaskId && selectedLog.migrationTaskId && !selectedLog.failedFileId && '查看迁移任务'}
+                    {!selectedLog.verificationId && !selectedLog.recoveryTaskId && selectedLog.failedFileId && '定位失败文件'}
+                  </button>
                 )}
               </div>
             </div>

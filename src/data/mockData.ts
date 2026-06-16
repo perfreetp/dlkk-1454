@@ -130,6 +130,14 @@ export interface AuditLog {
   ip: string;
   userAgent: string;
   createdAt: string;
+  /** 关联恢复任务 ID */
+  recoveryTaskId?: string;
+  /** 关联校验报告 ID */
+  verificationId?: string;
+  /** 关联迁移任务 ID */
+  migrationTaskId?: string;
+  /** 关联失败文件 ID */
+  failedFileId?: string;
 }
 
 export interface Notification {
@@ -183,6 +191,7 @@ export interface VerificationResult {
   details: VerificationDetail[];
   type?: 'migration' | 'recovery';
   fileDetails?: VerificationFileDetail[];
+  source?: 'auto' | 'manual';
 }
 
 export const currentOperator: Operator = {
@@ -615,7 +624,7 @@ export interface RecoveryTask {
   targetPath: string;
   fileIds?: string[];
   priority: 'low' | 'normal' | 'high' | 'urgent';
-  status: 'pending' | 'running' | 'completed' | 'failed';
+  status: 'pending' | 'running' | 'paused' | 'completed' | 'cancelled' | 'failed';
   progress: number;
   totalFiles: number;
   processedFiles: number;
@@ -627,10 +636,17 @@ export interface RecoveryTask {
   estimatedEndAt?: string;
   speedBytesPerSec?: number;
   relatedVerificationId?: string;
+  manualVerificationIds?: string[];
   completedAt?: string;
   createdAt: string;
   createdBy: string;
   errorMessage?: string;
+  cancelledAt?: string;
+  cancelReason?: string;
+  pausedAt?: string;
+  isCancelled?: boolean;
+  progressAtPause?: number;
+  processedAtPause?: number;
 }
 
 export const recoveryTasks: RecoveryTask[] = [
@@ -653,6 +669,7 @@ export const recoveryTasks: RecoveryTask[] = [
     completedAt: '2026-06-16T10:03:42+08:00',
     speedBytesPerSec: 105 * 1024 * 1024,
     relatedVerificationId: 'vr-003',
+    manualVerificationIds: [],
     createdAt: '2026-06-16T09:58:00+08:00',
     createdBy: '张明'
   },
@@ -694,6 +711,71 @@ export const recoveryTasks: RecoveryTask[] = [
     overwriteExisting: false,
     createdAt: '2026-06-16T09:45:00+08:00',
     createdBy: '张明'
+  },
+  {
+    id: 'rt-004',
+    name: '恢复 2026.06.08-daily 至 子目录',
+    versionId: 'bv-010',
+    targetId: 'tl-001',
+    targetPath: '\\\\nas01.company.local\\archive\\recovery_2026.06.08',
+    priority: 'high',
+    status: 'running',
+    progress: 43,
+    totalFiles: 57680,
+    processedFiles: 24802,
+    totalSize: '856.2 GB',
+    totalSizeBytes: 919279667200,
+    processedSize: '368.2 GB',
+    overwriteExisting: false,
+    startedAt: '2026-06-17T08:00:00+08:00',
+    speedBytesPerSec: 42 * 1024 * 1024,
+    createdAt: '2026-06-17T07:58:00+08:00',
+    createdBy: '张明'
+  },
+  {
+    id: 'rt-005',
+    name: '恢复 2026.06.01-daily 至 指定路径',
+    versionId: 'bv-011',
+    targetId: 'tl-002',
+    targetPath: 's3://company-archive-bucket/temp_audit_20260601',
+    priority: 'urgent',
+    status: 'paused',
+    progress: 67,
+    totalFiles: 56200,
+    processedFiles: 37654,
+    totalSize: '842.8 GB',
+    totalSizeBytes: 904884748288,
+    processedSize: '564.7 GB',
+    overwriteExisting: true,
+    startedAt: '2026-06-16T22:00:00+08:00',
+    pausedAt: '2026-06-17T02:15:30+08:00',
+    progressAtPause: 67,
+    processedAtPause: 37654,
+    speedBytesPerSec: 38 * 1024 * 1024,
+    createdAt: '2026-06-16T21:55:00+08:00',
+    createdBy: '张明'
+  },
+  {
+    id: 'rt-006',
+    name: '恢复 2026.05.25-daily 至 原路径',
+    versionId: 'bv-012',
+    targetId: 'tl-003',
+    targetPath: '/cold-backup/archive',
+    priority: 'normal',
+    status: 'cancelled',
+    progress: 28,
+    totalFiles: 890,
+    processedFiles: 249,
+    totalSize: '6.2 GB',
+    totalSizeBytes: 6657199309,
+    processedSize: '1.7 GB',
+    overwriteExisting: false,
+    startedAt: '2026-06-16T14:00:00+08:00',
+    cancelledAt: '2026-06-16T14:23:15+08:00',
+    cancelReason: '用户手动取消（目标路径权限需调整）',
+    isCancelled: true,
+    createdAt: '2026-06-16T13:58:00+08:00',
+    createdBy: '张明'
   }
 ];
 
@@ -713,6 +795,7 @@ export const verificationResults: VerificationResult[] = [
     endTime: '2026-06-01T03:08:45+08:00',
     createdAt: '2026-06-01T03:08:45+08:00',
     type: 'migration',
+    source: 'manual',
     details: [
       { id: 'vd-001', fileName: 'report_q1.xlsx', expectedHash: 'a1b2c3d4e5f60001', actualHash: 'a1b2c3d4e5f60001', status: 'passed', sizeMatch: true },
       { id: 'vd-002', fileName: 'invoice_may.pdf', expectedHash: 'b2c3d4e5f6a10002', actualHash: 'b2c3d4e5f6a10002', status: 'passed', sizeMatch: true },
@@ -746,6 +829,7 @@ export const verificationResults: VerificationResult[] = [
     endTime: '2026-06-11T05:42:20+08:00',
     createdAt: '2026-06-11T05:42:20+08:00',
     type: 'migration',
+    source: 'manual',
     details: [
       { id: 'vd-006', fileName: 'customer_0001.json', expectedHash: 'f6a1b2c3d4e50006', actualHash: 'f6a1b2c3d4e50006', status: 'passed', sizeMatch: true },
       { id: 'vd-007', fileName: 'customer_0892.json', expectedHash: 'a1b2c3f6e5d40007', actualHash: 'b2c3d4a1f6e50077', status: 'failed', sizeMatch: true },
@@ -770,7 +854,7 @@ export const verificationResults: VerificationResult[] = [
   },
   {
     id: 'vr-003',
-    taskId: 'bs-001',
+    taskId: 'rt-001',
     taskName: '财务数据备份恢复',
     name: '财务数据备份-版本校验',
     status: 'passed',
@@ -783,6 +867,7 @@ export const verificationResults: VerificationResult[] = [
     endTime: '2026-06-14T03:55:10+08:00',
     createdAt: '2026-06-14T03:55:10+08:00',
     type: 'recovery',
+    source: 'auto',
     details: [
       { id: 'vd-013', fileName: 'balance_sheet.xlsx', expectedHash: '001a1b2c3d4e5f60', actualHash: '001a1b2c3d4e5f60', status: 'passed', sizeMatch: true },
       { id: 'vd-014', fileName: 'income_statement.xlsx', expectedHash: '002b2c3d4e5f6a10', actualHash: '002b2c3d4e5f6a10', status: 'passed', sizeMatch: true },

@@ -181,7 +181,7 @@ export interface RecoveryTask {
   targetPath: string;
   fileIds?: string[];
   priority: TaskPriority;
-  status: 'pending' | 'running' | 'completed' | 'failed';
+  status: 'pending' | 'running' | 'paused' | 'completed' | 'cancelled' | 'failed';
   progress: number;
   totalFiles: number;
   processedFiles: number;
@@ -193,9 +193,16 @@ export interface RecoveryTask {
   estimatedEndAt?: string;
   speedBytesPerSec?: number;
   relatedVerificationId?: string;
+  manualVerificationIds?: string[];
   completedAt?: string;
   createdAt: string;
   errorMessage?: string;
+  cancelledAt?: string;
+  cancelReason?: string;
+  pausedAt?: string;
+  isCancelled?: boolean;
+  progressAtPause?: number;
+  processedAtPause?: number;
 }
 
 export type OperationType = 'create' | 'read' | 'update' | 'delete' | 'execute' | 'login' | 'logout';
@@ -215,6 +222,26 @@ export interface AuditLog {
   ipAddress?: string;
   userAgent?: string;
   createdAt: string;
+  /** 关联恢复任务 ID */
+  recoveryTaskId?: string;
+  /** 关联校验报告 ID */
+  verificationId?: string;
+  /** 关联迁移任务 ID */
+  migrationTaskId?: string;
+  /** 关联失败文件 ID */
+  failedFileId?: string;
+  /** 操作描述（兼容现有字段） */
+  action?: string;
+  /** 操作类型（兼容现有字段） */
+  actionType?: 'create' | 'update' | 'delete' | 'execute' | 'login' | 'logout' | 'download';
+  /** 目标 ID（兼容现有字段） */
+  target?: string;
+  /** 目标类型（兼容现有字段） */
+  targetType?: string;
+  /** 操作详情字符串（兼容现有字段） */
+  detailsStr?: string;
+  /** IP 地址（兼容现有字段） */
+  ip?: string;
 }
 
 export type NotificationType = 'success' | 'warning' | 'error' | 'info';

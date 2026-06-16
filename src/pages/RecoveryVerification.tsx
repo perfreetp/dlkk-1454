@@ -37,6 +37,10 @@ import {
   Copy,
   Loader2,
   Zap,
+  Hand,
+  Pin,
+  Pause,
+  Play,
 } from 'lucide-react';
 import DataTable, { type ColumnDef } from '@/components/common/DataTable';
 import ProgressBar from '@/components/common/ProgressBar';
@@ -224,12 +228,21 @@ function formatFileSize(size?: number): string {
   return formatBytes(size);
 }
 
+function getSuccessRate(vr: VerificationResult): number {
+  if (typeof vr.successRate === 'number') return vr.successRate;
+  return vr.totalFiles > 0 ? Math.round((vr.passedFiles / vr.totalFiles) * 10000) / 100 : 0;
+}
+
 export default function RecoveryVerification() {
   const location = useLocation();
-  const locationState = location.state as { defaultTab?: TabKey } | null;
+  const locationState = location.state as { defaultTab?: TabKey; openDrawer?: boolean; highlightTaskId?: string; highlightVrId?: string } | null;
   const [activeTab, setActiveTab] = useState<TabKey>(locationState?.defaultTab || 'compare');
   const [showRecoveryDrawer, setShowRecoveryDrawer] = useState(false);
   const [expandedVerificationId, setExpandedVerificationId] = useState<string | null>(null);
+  const [highlightedVrId, setHighlightedVrId] = useState<string | null>(null);
+  const [autoReportHighlight, setAutoReportHighlight] = useState<string | null>(null);
+  const [highlightedTaskId, setHighlightedTaskId] = useState<string | null>(null);
+  const [toast, setToast] = useState<{ show: boolean; message: string; type: 'info' | 'error' }>({ show: false, message: '', type: 'info' });
 
   const store = useAppStore();
 
@@ -241,15 +254,95 @@ export default function RecoveryVerification() {
     if (locationState?.defaultTab) {
       setActiveTab(locationState.defaultTab);
     }
-  }, [locationState?.defaultTab]);
+    if (locationState?.openDrawer) {
+      setShowRecoveryDrawer(true);
+    }
+    if (locationState?.highlightTaskId) {
+      setHighlightedTaskId(locationState.highlightTaskId);
+      setTimeout(() => setHighlightedTaskId(null), 4000);
+    }
+    if (locationState?.highlightVrId) {
+      const vr = store.verificationResults.find((v) => v.id === locationState.highlightVrId);
+      if (vr) {
+        const isAuto = vr.source === 'auto';
+        const event = new CustomEvent('vr-highlight-request', { detail: { vrId: vr.id, taskId: vr.taskId } });
+        window.dispatchEvent(event);
+        setExpandedVerificationId(vr.id);
+        setHighlightedVrId(vr.id);
+        if (isAuto) {
+          setAutoReportHighlight(vr.id);
+        }
+        setTimeout(() => {
+          setHighlightedVrId(null);
+          if (isAuto) setAutoReportHighlight(null);
+          const el = document.getElementById(`verification-card-${vr.id}`);
+          if (el) el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        }, 200);
+      }
+    }
+  }, [locationState?.defaultTab, locationState?.openDrawer, locationState?.highlightTaskId, locationState?.highlightVrId, store.verificationResults]);
+
+  const showToastMsg = (message: string, type: 'info' | 'error' = 'info') => {
+    setToast({ show: true, message, type });
+    setTimeout(() => setToast({ show: false, message: '', type: 'info' }), 3000);
+  };
+
+  const navigateToVerification = (vrId: string, isAutoReport: boolean = false) => {
+    setActiveTab('verification');
+    setExpandedVerificationId(vrId);
+    setHighlightedVrId(vrId);
+    if (isAutoReport) {
+      setAutoReportHighlight(vrId);
+    }
+    setShowRecoveryDrawer(false);
+    setTimeout(() => setHighlightedVrId(null), 4000);
+    if (isAutoReport) {
+      setTimeout(() => setAutoReportHighlight(null), 4000);
+    }
+  };
 
   const handleViewVerificationReport = (taskId: string) => {
+    const task = store.recoveryTasks.find((t) => t.id === taskId);
+    if (!task) return;
+    if (task.relatedVerificationId) {
+      const vr = store.verificationResults.find((v) => v.id === task.relatedVerificationId);
+      if (vr) {
+        navigateToVerification(vr.id, true);
+        return;
+      }
+    }
     const vr = store.verificationResults.find((v) => v.taskId === taskId);
     if (vr) {
-      setActiveTab('verification');
-      setExpandedVerificationId(vr.id);
-      setShowRecoveryDrawer(false);
+      const isAuto = vr.source === 'auto';
+      navigateToVerification(vr.id, isAuto);
+    } else {
+      showToastMsg('自动校验报告尚不存在', 'error');
     }
+  };
+
+  const handleViewManualReport = (vrIdOrTaskId: string) => {
+    const existingVr = store.verificationResults.find((v) => v.id === vrIdOrTaskId);
+    if (existingVr) {
+      const isAuto = existingVr.source === 'auto';
+      navigateToVerification(existingVr.id, isAuto);
+      return;
+    }
+    const taskId = vrIdOrTaskId;
+    const task = store.migrationTasks.find((t) => t.id === taskId) || store.recoveryTasks.find((t) => t.id === taskId);
+    if (!task) {
+      showToastMsg('未找到该任务', 'error');
+      return;
+    }
+    const vrType = store.migrationTasks.some((t) => t.id === taskId) ? 'migration' : 'recovery';
+    const newVrId = store.generateVerification({
+      taskId,
+      name: `${task.name}-手动校验`,
+      totalFiles: task.totalFiles,
+      type: vrType as 'migration' | 'recovery',
+      source: 'manual',
+    } as any);
+    navigateToVerification(newVrId, false);
+    showToastMsg('已为该任务生成手动校验报告', 'info');
   };
 
   return (
@@ -307,6 +400,8 @@ export default function RecoveryVerification() {
               <VerificationTab
                 expandedId={expandedVerificationId}
                 onExpandedChange={setExpandedVerificationId}
+                externalHighlightedVrId={highlightedVrId}
+                autoReportHighlight={autoReportHighlight}
               />
             )}
           </div>
@@ -317,6 +412,8 @@ export default function RecoveryVerification() {
         open={showRecoveryDrawer}
         onClose={() => setShowRecoveryDrawer(false)}
         onViewVerificationReport={handleViewVerificationReport}
+        onViewManualReport={handleViewManualReport}
+        showToast={showToastMsg}
       />
     </div>
   );
@@ -1470,7 +1567,39 @@ function ConfirmModal({
   );
 }
 
-const formatDateForFilename = (iso?: string) => (iso ?? new Date().toISOString()).slice(0,19).replace(/[:T]/g,'-');
+const TYPE_LABEL_CN: Record<string, string> = {
+  migration: '迁移校验',
+  recovery: '恢复校验',
+};
+
+const sanitizeFilename = (name: string): string => {
+  return name.replace(/[\\/:*?"<>|]/g, '_');
+};
+
+const formatDateForCsvName = (iso?: string): { date: string; time: string } => {
+  const d = iso ? new Date(iso) : new Date();
+  const pad = (n: number) => String(n).padStart(2, '0');
+  const date = `${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}`;
+  const time = `${pad(d.getHours())}${pad(d.getMinutes())}${pad(d.getSeconds())}`;
+  return { date, time };
+};
+
+export type FailedCategory = '校验值不一致' | '大小不一致' | '缺失文件' | '其他异常';
+
+export function classifyFileFailure(d: VerificationFileDetail): FailedCategory | null {
+  if (d.passed) return null;
+  const reason = d.failedReason || '';
+  if (reason === '校验值不匹配' || (d.sourceChecksum && d.targetChecksum && d.sourceChecksum !== d.targetChecksum && d.targetChecksum !== '')) {
+    return '校验值不一致';
+  }
+  if (reason === '文件大小不匹配' || reason === '文件大小不一致') {
+    return '大小不一致';
+  }
+  if (reason === '目标端文件缺失' || (d.sourceChecksum && (!d.targetChecksum || d.targetChecksum === ''))) {
+    return '缺失文件';
+  }
+  return '其他异常';
+}
 
 function generateMockDetails(vr: VerificationResult): VerificationFileDetail[] {
   const count = Math.max(10, Math.min(50, vr.totalFiles));
@@ -1491,12 +1620,28 @@ function generateMockDetails(vr: VerificationResult): VerificationFileDetail[] {
     const size = formatBytes(sizeBytes);
     const baseHash = `${vr.id}-file-${i}`.padEnd(16, '0').slice(0, 16);
     const isFailed = i < failedCount;
-    const sourceChecksum = baseHash;
-    const targetChecksum = isFailed ? baseHash.split('').reverse().join('') : baseHash;
+
+    let sourceChecksum = baseHash;
+    let targetChecksum = baseHash;
     let failedReason: string | undefined;
+
     if (isFailed) {
-      failedReason = i % 2 === 0 ? '校验值不匹配' : '文件大小不匹配';
+      const failMode = i % 4;
+      if (failMode === 0) {
+        targetChecksum = baseHash.split('').reverse().join('');
+        failedReason = '校验值不匹配';
+      } else if (failMode === 1) {
+        failedReason = '文件大小不匹配';
+        targetChecksum = baseHash;
+      } else if (failMode === 2) {
+        targetChecksum = '';
+        failedReason = '目标端文件缺失';
+      } else {
+        targetChecksum = baseHash.split('').sort().join('');
+        failedReason = '校验值不匹配';
+      }
     }
+
     details.push({
       id: `mock-${vr.id}-${i}`,
       fileName,
@@ -1513,6 +1658,11 @@ function generateMockDetails(vr: VerificationResult): VerificationFileDetail[] {
   return details;
 }
 
+interface ExportCsvOptions {
+  onlyFailed?: boolean;
+  reasonFilter?: string;
+}
+
 interface ToastState {
   show: boolean;
   message: string;
@@ -1521,30 +1671,47 @@ interface ToastState {
 
 function useVerificationCsvExport() {
   const [toast, setToast] = useState<ToastState>({ show: false, message: '', type: 'success' });
+  const store = useAppStore();
 
   const showToast = (message: string, type: ToastState['type'] = 'success') => {
     setToast({ show: true, message, type });
     setTimeout(() => setToast({ show: false, message: '', type: 'success' }), 3000);
   };
 
-  const exportVerificationCsv = (vr: VerificationResult) => {
-    const details = vr.fileDetails ?? generateMockDetails(vr);
+  const exportVerificationCsv = (vr: VerificationResult, options?: ExportCsvOptions) => {
+    const { onlyFailed = false, reasonFilter } = options || {};
+    const allDetails = vr.fileDetails ?? generateMockDetails(vr);
+
+    let details = allDetails;
+    if (onlyFailed || reasonFilter) {
+      details = allDetails.filter((d) => {
+        const category = classifyFileFailure(d);
+        if (onlyFailed && d.passed) return false;
+        if (reasonFilter && category !== reasonFilter) return false;
+        return true;
+      });
+    }
+
     const headers = [
       '序号','状态','文件名','完整路径','文件大小',
-      '校验算法','源端校验值','目标端校验值','校验结果','失败原因'
+      '校验算法','源端校验值','目标端校验值','校验结果','失败原因','异常分类'
     ];
-    const rows = details.map((d, i) => ([
-      i + 1,
-      d.passed ? '通过' : '异常',
-      d.fileName,
-      d.filePath,
-      d.size ?? formatBytes(d.sizeBytes ?? 0),
-      (d.algorithm ?? 'md5').toUpperCase(),
-      d.sourceChecksum,
-      d.targetChecksum,
-      d.sourceChecksum === d.targetChecksum ? '一致' : '不一致',
-      d.failedReason ?? (d.passed ? '' : '校验值不匹配')
-    ]));
+    const rows = details.map((d, i) => {
+      const category = classifyFileFailure(d);
+      return ([
+        i + 1,
+        d.passed ? '通过' : '异常',
+        d.fileName,
+        d.filePath,
+        d.size ?? formatBytes(d.sizeBytes ?? 0),
+        (d.algorithm ?? 'md5').toUpperCase(),
+        d.sourceChecksum,
+        d.targetChecksum,
+        d.sourceChecksum === d.targetChecksum ? '一致' : '不一致',
+        d.failedReason ?? (d.passed ? '' : '校验值不匹配'),
+        category ?? (d.passed ? '' : '其他异常')
+      ]);
+    });
     const csv = '\uFEFF' + [headers, ...rows].map(r =>
       r.map(cell => {
         const s = String(cell ?? '').replace(/"/g, '""');
@@ -1555,13 +1722,30 @@ function useVerificationCsvExport() {
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    const safeName = `${vr.type ?? 'verification'}-${vr.taskName ?? vr.id}-${formatDateForFilename(vr.createdAt)}.csv`;
+
+    const taskRawName = vr.taskName ?? vr.name ?? '未命名任务';
+    const taskName = sanitizeFilename(taskRawName);
+    const typeLabel = TYPE_LABEL_CN[vr.type || ''] || '校验';
+    const { date, time } = formatDateForCsvName(vr.createdAt);
+    const idSuffix = vr.id.slice(-4);
+    let suffix = '';
+    if (reasonFilter) suffix = `-${sanitizeFilename(reasonFilter)}`;
+    else if (onlyFailed) suffix = '-异常';
+    const safeName = `${taskName}-${typeLabel}-${date}-${time}-vr${idSuffix}${suffix}.csv`;
     a.download = safeName;
     document.body.appendChild(a);
     a.click();
     document.body.removeChild(a);
     URL.revokeObjectURL(url);
-    showToast(`已生成并下载：${safeName}`, 'success');
+
+    const onlyAbnormal = onlyFailed || !!reasonFilter;
+    store.logCsvExport(vr.id, {
+      fileName: safeName,
+      onlyAbnormal,
+      count: details.length,
+    });
+
+    showToast(`已导出：${safeName}`, 'success');
   };
 
   const ToastComponent = toast.show ? (
@@ -1598,6 +1782,8 @@ function useVerificationCsvExport() {
 interface VerificationTabProps {
   expandedId?: string | null;
   onExpandedChange?: (id: string | null) => void;
+  externalHighlightedVrId?: string | null;
+  autoReportHighlight?: string | null;
 }
 
 interface VerificationGroup {
@@ -1606,7 +1792,7 @@ interface VerificationGroup {
   results: VerificationResult[];
 }
 
-function VerificationTab({ expandedId, onExpandedChange }: VerificationTabProps) {
+function VerificationTab({ expandedId, onExpandedChange, externalHighlightedVrId, autoReportHighlight }: VerificationTabProps) {
   const store = useAppStore();
   const [internalExpandedId, setInternalExpandedId] = useState<string | null>(null);
   const [expandedGroupIds, setExpandedGroupIds] = useState<Set<string>>(new Set());
@@ -1615,7 +1801,7 @@ function VerificationTab({ expandedId, onExpandedChange }: VerificationTabProps)
   const [newVerificationType, setNewVerificationType] = useState<'migration' | 'recovery'>('migration');
   const [algorithm, setAlgorithm] = useState<'MD5' | 'SHA256'>('SHA256');
   const [showSuccess, setShowSuccess] = useState(false);
-  const [highlightedVrId, setHighlightedVrId] = useState<string | null>(null);
+  const [localHighlightedVrId, setLocalHighlightedVrId] = useState<string | null>(null);
 
   const [filterType, setFilterType] = useState<'all' | 'migration' | 'recovery'>('all');
   const [filterResult, setFilterResult] = useState<'all' | 'pass' | 'fail'>('all');
@@ -1706,11 +1892,6 @@ function VerificationTab({ expandedId, onExpandedChange }: VerificationTabProps)
     }
   };
 
-  const getSuccessRate = (vr: VerificationResult): number => {
-    if (typeof vr.successRate === 'number') return vr.successRate;
-    return vr.totalFiles > 0 ? Math.round((vr.passedFiles / vr.totalFiles) * 10000) / 100 : 0;
-  };
-
   const effectiveExpandedId = expandedId !== undefined ? expandedId : internalExpandedId;
   const setEffectiveExpandedId = (id: string | null) => {
     if (onExpandedChange) {
@@ -1768,8 +1949,8 @@ function VerificationTab({ expandedId, onExpandedChange }: VerificationTabProps)
     setTimeout(() => setShowSuccess(false), 3000);
 
     setExpandedGroupIds((prev) => new Set(prev).add(newTaskId));
-    setHighlightedVrId(newVrId);
-    setTimeout(() => setHighlightedVrId(null), 3000);
+    setLocalHighlightedVrId(newVrId);
+    setTimeout(() => setLocalHighlightedVrId(null), 3000);
 
     setTimeout(() => {
       setEffectiveExpandedId(newVrId);
@@ -1800,6 +1981,26 @@ function VerificationTab({ expandedId, onExpandedChange }: VerificationTabProps)
         校验
       </span>
     );
+  };
+
+  const getSourceBadge = (source?: 'auto' | 'manual') => {
+    if (source === 'auto') {
+      return (
+        <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[10px] font-semibold border bg-sky-50 text-sky-700 border-sky-200">
+          <Zap className="h-3 w-3" />
+          自动
+        </span>
+      );
+    }
+    if (source === 'manual') {
+      return (
+        <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[10px] font-semibold border bg-amber-50 text-amber-700 border-amber-200">
+          <Hand className="h-3 w-3" />
+          手动
+        </span>
+      );
+    }
+    return null;
   };
 
   const openNewVerificationModal = () => {
@@ -2008,9 +2209,16 @@ function VerificationTab({ expandedId, onExpandedChange }: VerificationTabProps)
                       }
 
                       const isExpanded = effectiveExpandedId === vr.id;
-                      const isHighlighted = highlightedVrId === vr.id || expandedId === vr.id;
+                      const isLocalHighlighted = localHighlightedVrId === vr.id;
+                      const isExternalHighlighted = externalHighlightedVrId === vr.id;
+                      const isAutoSpecialHighlight = autoReportHighlight === vr.id;
+                      const isHighlighted = isLocalHighlighted || isExternalHighlighted || expandedId === vr.id;
                       const details = generateMockVerificationDetails(vr);
                       const rate = getSuccessRate(vr);
+                      const isAutoSource = vr.source === 'auto';
+                      const relatedRecoveryTask = isAutoSource
+                        ? store.recoveryTasks.find((r) => r.relatedVerificationId === vr.id)
+                        : null;
 
                       return (
                         <div
@@ -2018,17 +2226,33 @@ function VerificationTab({ expandedId, onExpandedChange }: VerificationTabProps)
                           id={`verification-card-${vr.id}`}
                           className={cn(
                             'rounded-xl border overflow-hidden transition-all relative',
-                            isHighlighted
-                              ? 'border-primary-400 ring-2 ring-primary-100 shadow-lg z-10'
-                              : 'border-slate-200 bg-white',
-                            !isLatest && 'opacity-95'
+                            isAutoSpecialHighlight
+                              ? 'border-sky-400 ring-4 ring-sky-100 shadow-lg z-10'
+                              : isHighlighted
+                                ? 'border-primary-400 ring-2 ring-primary-100 shadow-lg z-10'
+                                : isLatest
+                                  ? 'border-primary-300/60 ring-1 ring-primary-100 bg-white'
+                                  : 'border-slate-200 bg-white',
+                            !isLatest && !isAutoSpecialHighlight && 'opacity-95'
                           )}
                         >
                           <div className={cn('relative', isLatest ? 'p-5' : 'p-4')}>
-                            {!isLatest && (
+                            {isAutoSource && relatedRecoveryTask && (
+                              <div className="absolute top-2 right-2 inline-flex items-center gap-1 px-2.5 py-1 rounded-lg text-[10px] font-semibold bg-sky-50 text-sky-700 border border-sky-200 z-10 shadow-sm">
+                                <Pin className="h-3 w-3" />
+                                此报告由恢复任务 {relatedRecoveryTask.id} 自动生成
+                              </div>
+                            )}
+                            {!isLatest && !isAutoSource && (
                               <div className="absolute top-2 left-2 inline-flex items-center gap-1 px-2 py-0.5 rounded text-[9px] font-semibold bg-slate-200 text-slate-600 border border-slate-300 z-10">
                                 <Clock className="h-2.5 w-2.5" />
                                 历史
+                              </div>
+                            )}
+                            {isLatest && !isAutoSource && (
+                              <div className="absolute top-2 left-2 inline-flex items-center gap-1 px-2 py-0.5 rounded text-[9px] font-semibold bg-primary-100 text-primary-700 border border-primary-200 z-10">
+                                <Zap className="h-2.5 w-2.5" />
+                                最新
                               </div>
                             )}
                             <div className="flex flex-wrap items-start justify-between gap-3">
@@ -2038,6 +2262,23 @@ function VerificationTab({ expandedId, onExpandedChange }: VerificationTabProps)
                                     {vr.name}
                                   </h3>
                                   {getTypeBadge(vr.type)}
+                                  {getSourceBadge(vr.source)}
+                                  <button
+                                    onClick={() => exportVerificationCsv(vr)}
+                                    disabled={vr.totalFiles === 0}
+                                    className={cn(
+                                      'inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[10px] font-medium border transition-all',
+                                      vr.totalFiles === 0
+                                        ? 'bg-slate-50 text-slate-400 border-slate-200 cursor-not-allowed'
+                                        : isLatest
+                                          ? 'bg-primary-50 text-primary-700 border-primary-200 hover:bg-primary-100 hover:border-primary-300'
+                                          : 'bg-white text-slate-700 border-slate-200 hover:bg-slate-50 hover:border-slate-300'
+                                    )}
+                                    title="导出 CSV"
+                                  >
+                                    <Download className="h-3 w-3" />
+                                    CSV
+                                  </button>
                                   <span className={cn(
                                     'inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-[11px] font-medium',
                                     statusConfig.bg,
@@ -2065,22 +2306,6 @@ function VerificationTab({ expandedId, onExpandedChange }: VerificationTabProps)
                                   <StatMini label="异常" value={failed.toLocaleString()} color={failed > 0 ? 'amber' : 'slate'} compact={!isLatest} />
                                 </div>
                                 <div className="flex items-center gap-1.5">
-                                  {isLatest && (
-                                    <button
-                                      onClick={() => exportVerificationCsv(vr)}
-                                      disabled={vr.totalFiles === 0}
-                                      className={cn(
-                                        'inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-[11px] font-medium border transition-all',
-                                        vr.totalFiles === 0
-                                          ? 'bg-slate-50 text-slate-400 border-slate-200 cursor-not-allowed'
-                                          : 'bg-white text-slate-700 border-slate-200 hover:bg-slate-50 hover:border-slate-300'
-                                      )}
-                                      title="导出 CSV"
-                                    >
-                                      <Download className="h-3 w-3" />
-                                      CSV
-                                    </button>
-                                  )}
                                   <button
                                     onClick={() => setEffectiveExpandedId(isExpanded ? null : vr.id)}
                                     className={cn(
@@ -2111,15 +2336,10 @@ function VerificationTab({ expandedId, onExpandedChange }: VerificationTabProps)
                           </div>
 
                           {isExpanded && (
-                            <div className="border-t border-slate-100">
-                              <div className="px-5 py-3 bg-slate-50/60 border-b border-slate-100 flex items-center justify-between">
-                                <h4 className="text-xs font-semibold text-slate-700">校验明细</h4>
-                                <span className="text-xs text-slate-400">
-                                  显示前 {details.length} 条记录
-                                </span>
-                              </div>
-                              <VerificationDetailsTable details={details} />
-                            </div>
+                            <VerificationReportDetails
+                              vr={vr}
+                              exportVerificationCsv={exportVerificationCsv}
+                            />
                           )}
                         </div>
                       );
@@ -2311,74 +2531,386 @@ function StatMini({ label, value, color, compact }: { label: string; value: stri
   );
 }
 
-function VerificationDetailsTable({ details }: { details: (VerificationDetail & { path: string; expectedSize: number; actualSize: number; size: number })[] }) {
-  const columns: ColumnDef<(typeof details)[number]>[] = [
+interface AggregatedCategory {
+  name: FailedCategory;
+  count: number;
+  icon: React.ReactNode;
+  color: string;
+}
+
+type PassFilter = 'all' | 'passed' | 'failed';
+
+interface VerificationReportDetailsProps {
+  vr: VerificationResult;
+  exportVerificationCsv: (vr: VerificationResult, options?: ExportCsvOptions) => void;
+}
+
+function VerificationReportDetails({ vr, exportVerificationCsv }: VerificationReportDetailsProps) {
+  const details: VerificationFileDetail[] = useMemo(
+    () => vr.fileDetails ?? generateMockDetails(vr),
+    [vr]
+  );
+
+  const [passFilter, setPassFilter] = useState<PassFilter>('all');
+  const [categoryFilter, setCategoryFilter] = useState<FailedCategory | 'all'>('all');
+
+  const aggregated = useMemo<AggregatedCategory[]>(() => {
+    const counts: Record<FailedCategory, number> = {
+      '校验值不一致': 0,
+      '大小不一致': 0,
+      '缺失文件': 0,
+      '其他异常': 0,
+    };
+    details.forEach((d) => {
+      const cat = classifyFileFailure(d);
+      if (cat) counts[cat]++;
+    });
+    const iconMap: Record<FailedCategory, { icon: React.ReactNode; color: string }> = {
+      '校验值不一致': { icon: <AlertTriangle className="h-4 w-4" />, color: 'amber' },
+      '大小不一致': { icon: <Package className="h-4 w-4" />, color: 'violet' },
+      '缺失文件': { icon: <XCircle className="h-4 w-4" />, color: 'rose' },
+      '其他异常': { icon: <ShieldAlert className="h-4 w-4" />, color: 'slate' },
+    };
+    const result: AggregatedCategory[] = [];
+    (Object.keys(counts) as FailedCategory[]).forEach((name) => {
+      if (counts[name] > 0) {
+        result.push({ name, count: counts[name], ...iconMap[name] });
+      }
+    });
+    return result;
+  }, [details]);
+
+  const totalFailed = aggregated.reduce((sum, c) => sum + c.count, 0);
+  const totalPassed = details.length - totalFailed;
+
+  const filteredDetails = useMemo(() => {
+    return details.filter((d) => {
+      if (passFilter === 'passed' && !d.passed) return false;
+      if (passFilter === 'failed' && d.passed) return false;
+      if (categoryFilter !== 'all') {
+        const cat = classifyFileFailure(d);
+        if (cat !== categoryFilter) return false;
+      }
+      return true;
+    });
+  }, [details, passFilter, categoryFilter]);
+
+  const handleViewCategory = (cat: FailedCategory) => {
+    setCategoryFilter(cat);
+    setPassFilter('failed');
+  };
+
+  const clearFilters = () => {
+    setPassFilter('all');
+    setCategoryFilter('all');
+  };
+
+  const colorMapBg: Record<string, string> = {
+    amber: 'bg-amber-50 border-amber-200',
+    violet: 'bg-violet-50 border-violet-200',
+    rose: 'bg-rose-50 border-rose-200',
+    slate: 'bg-slate-50 border-slate-200',
+  };
+  const colorMapText: Record<string, string> = {
+    amber: 'text-amber-700',
+    violet: 'text-violet-700',
+    rose: 'text-rose-700',
+    slate: 'text-slate-700',
+  };
+  const colorMapIconBg: Record<string, string> = {
+    amber: 'bg-amber-100 text-amber-600',
+    violet: 'bg-violet-100 text-violet-600',
+    rose: 'bg-rose-100 text-rose-600',
+    slate: 'bg-slate-100 text-slate-600',
+  };
+
+  return (
+    <div className="border-t border-slate-100">
+      {totalFailed > 0 ? (
+        <div className="px-5 py-4 bg-amber-50/40 border-b border-amber-100">
+          <div className="flex flex-wrap items-start justify-between gap-3 mb-3">
+            <div className="flex items-center gap-2">
+              <div className="w-8 h-8 rounded-lg bg-amber-100 flex items-center justify-center text-amber-600">
+                <AlertTriangle className="h-4 w-4" />
+              </div>
+              <div>
+                <div className="text-sm font-bold text-amber-800">异常分类统计</div>
+                <div className="text-xs text-amber-600">
+                  共 {aggregated.length} 类异常，{totalFailed} 个文件
+                </div>
+              </div>
+            </div>
+            <button
+              onClick={() => exportVerificationCsv(vr, { onlyFailed: true })}
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-rose-600 text-white rounded-lg text-xs font-medium hover:bg-rose-700 shadow-sm shadow-rose-500/20 transition-all"
+            >
+              <Download className="h-3.5 w-3.5" />
+              只导出异常明细
+            </button>
+          </div>
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+            {aggregated.map((cat) => {
+              const active = categoryFilter === cat.name;
+              return (
+                <div
+                  key={cat.name}
+                  className={cn(
+                    'rounded-xl border-2 p-3 transition-all',
+                    active
+                      ? 'border-primary-400 bg-primary-50/60 shadow-sm shadow-primary-500/10'
+                      : colorMapBg[cat.color]
+                  )}
+                >
+                  <div className={cn(
+                    'flex items-center gap-2 mb-2',
+                    active ? 'text-primary-700' : colorMapText[cat.color]
+                  )}>
+                    <div className={cn(
+                      'w-7 h-7 rounded-lg flex items-center justify-center flex-shrink-0',
+                      active ? 'bg-primary-100 text-primary-600' : colorMapIconBg[cat.color]
+                    )}>
+                      {cat.icon}
+                    </div>
+                    <div className="font-semibold text-xs flex-1">{cat.name}</div>
+                  </div>
+                  <div className={cn(
+                    'font-mono font-bold text-lg mb-2',
+                    active ? 'text-primary-700' : colorMapText[cat.color]
+                  )}>
+                    {cat.count} <span className="text-[11px] font-normal opacity-70">个文件</span>
+                  </div>
+                  <div className="flex flex-col gap-1.5">
+                    <button
+                      onClick={() => handleViewCategory(cat.name)}
+                      className={cn(
+                        'inline-flex items-center justify-center gap-1 px-2 py-1 rounded-md text-[11px] font-medium border transition-all w-full',
+                        active
+                          ? 'bg-primary-100 text-primary-700 border-primary-300'
+                          : 'bg-white/70 text-slate-700 border-slate-200 hover:bg-white hover:border-slate-300'
+                      )}
+                    >
+                      <Eye className="h-3 w-3" />
+                      查看明细
+                    </button>
+                    <button
+                      onClick={() => exportVerificationCsv(vr, { reasonFilter: cat.name })}
+                      className="inline-flex items-center justify-center gap-1 px-2 py-1 rounded-md text-[11px] font-medium border border-slate-200 bg-white/70 text-slate-700 hover:bg-white hover:border-slate-300 transition-all w-full"
+                    >
+                      <Download className="h-3 w-3" />
+                      只导这些
+                    </button>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      ) : (
+        <div className="px-5 py-4 bg-emerald-50/50 border-b border-emerald-100 flex items-center justify-center gap-3">
+          <div className="w-9 h-9 rounded-full bg-emerald-100 flex items-center justify-center text-emerald-600">
+            <CheckCircle className="h-5 w-5" />
+          </div>
+          <div className="text-center">
+            <div className="text-sm font-semibold text-emerald-800">全部校验通过</div>
+            <div className="text-xs text-emerald-600">共 {details.length} 个文件，无异常</div>
+          </div>
+        </div>
+      )}
+
+      <div className="px-5 py-3 bg-slate-50/60 border-b border-slate-100 space-y-2">
+        {(passFilter !== 'all' || categoryFilter !== 'all') && (
+          <div className="flex items-center justify-between gap-3 px-3 py-2 rounded-lg bg-primary-50 border border-primary-200">
+            <div className="flex items-center gap-2 text-xs text-primary-700 flex-1 min-w-0">
+              <FilterIcon className="h-3.5 w-3.5 flex-shrink-0" />
+              <span className="font-medium flex-shrink-0">当前筛选：</span>
+              <span className="font-semibold truncate">
+                {categoryFilter !== 'all'
+                  ? `${categoryFilter}（${aggregated.find(a => a.name === categoryFilter)?.count ?? 0}/${totalFailed}）`
+                  : passFilter === 'passed'
+                    ? '仅显示通过'
+                    : '仅显示异常'}
+              </span>
+            </div>
+            <button
+              onClick={clearFilters}
+              className="inline-flex items-center gap-1 px-2 py-1 rounded-md bg-white border border-primary-200 text-primary-700 text-[11px] font-medium hover:bg-primary-100 transition-all flex-shrink-0"
+            >
+              <X className="h-3 w-3" />
+              清除筛选
+            </button>
+          </div>
+        )}
+
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div className="flex flex-wrap items-center gap-2">
+            <div className="flex items-center bg-white border border-slate-200 rounded-lg p-0.5">
+              <FilterChip
+                active={passFilter === 'all'}
+                onClick={() => { setPassFilter('all'); setCategoryFilter('all'); }}
+                label={`全部 ${details.length}`}
+              />
+              <FilterChip
+                active={passFilter === 'passed'}
+                onClick={() => { setPassFilter('passed'); setCategoryFilter('all'); }}
+                label={`通过 ${totalPassed}`}
+                color="emerald"
+              />
+              <FilterChip
+                active={passFilter === 'failed'}
+                onClick={() => { setPassFilter('failed'); setCategoryFilter('all'); }}
+                label={`异常 ${totalFailed}`}
+                color="amber"
+              />
+            </div>
+
+            {totalFailed > 0 && (
+              <>
+                <span className="text-slate-300 text-sm">|</span>
+                <div className="flex items-center gap-1.5">
+                  <span className="text-xs text-slate-500 whitespace-nowrap">异常子类：</span>
+                  <div className="flex items-center bg-white border border-slate-200 rounded-lg p-0.5">
+                    <FilterChip
+                      active={categoryFilter === 'all'}
+                      onClick={() => setCategoryFilter('all')}
+                      label="全部"
+                      size="sm"
+                    />
+                    {aggregated.map((cat) => (
+                      <FilterChip
+                        key={cat.name}
+                        active={categoryFilter === cat.name}
+                        onClick={() => { setCategoryFilter(cat.name); setPassFilter('failed'); }}
+                        label={`${cat.name.slice(0, 4)}${cat.count}`}
+                        size="sm"
+                      />
+                    ))}
+                  </div>
+                </div>
+              </>
+            )}
+          </div>
+          <span className="text-xs text-slate-400">
+            显示 {filteredDetails.length} / {details.length} 条记录
+          </span>
+        </div>
+      </div>
+
+      <VerificationDetailsTable details={filteredDetails} />
+    </div>
+  );
+}
+
+function FilterIcon({ className }: { className?: string }) {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className={className}>
+      <polygon points="22 3 2 3 10 12.46 10 19 14 21 14 12.46 22 3" />
+    </svg>
+  );
+}
+
+function FilterChip({
+  active,
+  onClick,
+  label,
+  color = 'primary',
+  size = 'md',
+}: {
+  active: boolean;
+  onClick: () => void;
+  label: string;
+  color?: 'primary' | 'emerald' | 'amber';
+  size?: 'sm' | 'md';
+}) {
+  const colorActive = {
+    primary: 'bg-primary-600 text-white shadow-sm shadow-primary-500/20',
+    emerald: 'bg-emerald-600 text-white shadow-sm shadow-emerald-500/20',
+    amber: 'bg-amber-600 text-white shadow-sm shadow-amber-500/20',
+  };
+  return (
+    <button
+      onClick={onClick}
+      className={cn(
+        'rounded-md font-medium transition-all',
+        size === 'sm' ? 'px-2 py-1 text-[10px]' : 'px-3 py-1.5 text-xs',
+        active ? colorActive[color] : 'text-slate-600 hover:text-slate-800 hover:bg-slate-200/60'
+      )}
+    >
+      {label}
+    </button>
+  );
+}
+
+function VerificationDetailsTable({ details }: { details: VerificationFileDetail[] }) {
+  const columns: ColumnDef<VerificationFileDetail>[] = [
     {
-      id: 'path',
+      id: 'filePath',
       header: '文件路径',
-      accessorKey: 'path' as any,
+      accessorKey: 'filePath',
       sortable: true,
       cell: (row) => (
         <div className="min-w-0">
-          <div className="font-mono text-sm text-slate-800 truncate max-w-md" title={row.path}>{row.path}</div>
+          <div className="font-mono text-sm text-slate-800 truncate max-w-md" title={row.filePath}>{row.filePath}</div>
           <div className="text-xs text-slate-400 truncate max-w-md" title={row.fileName}>{row.fileName}</div>
         </div>
       ),
     },
     {
-      id: 'expectedHash',
+      id: 'sourceChecksum',
       header: '源校验码',
-      accessorKey: 'expectedHash' as any,
+      accessorKey: 'sourceChecksum',
       width: '160px',
       cell: (row) => (
         <span className="font-mono text-xs text-slate-500 bg-slate-50 px-2 py-1 rounded border border-slate-100">
-          {truncateHash(row.expectedHash, 14)}
+          {truncateHash(row.sourceChecksum, 14)}
         </span>
       ),
     },
     {
-      id: 'actualHash',
+      id: 'targetChecksum',
       header: '目标校验码',
-      accessorKey: 'actualHash' as any,
+      accessorKey: 'targetChecksum',
       width: '160px',
-      cell: (row) => (
-        <span className={cn(
-          'font-mono text-xs px-2 py-1 rounded border',
-          row.status === 'passed'
-            ? 'text-emerald-600 bg-emerald-50 border-emerald-100'
-            : 'text-rose-600 bg-rose-50 border-rose-100'
-        )}>
-          {truncateHash(row.actualHash, 14)}
-        </span>
-      ),
+      cell: (row) => {
+        const match = row.sourceChecksum === row.targetChecksum && row.targetChecksum !== '';
+        return (
+          <span className={cn(
+            'font-mono text-xs px-2 py-1 rounded border',
+            match
+              ? 'text-emerald-600 bg-emerald-50 border-emerald-100'
+              : row.targetChecksum === ''
+                ? 'text-rose-600 bg-rose-50 border-rose-100'
+                : 'text-amber-600 bg-amber-50 border-amber-100'
+          )}>
+            {row.targetChecksum ? truncateHash(row.targetChecksum, 14) : '—缺失—'}
+          </span>
+        );
+      },
     },
     {
-      id: 'status',
-      header: '状态',
-      accessorKey: 'status' as any,
-      width: '100px',
+      id: 'category',
+      header: '异常分类',
+      width: '110px',
       align: 'center',
       cell: (row) => {
-        if (row.status === 'passed') {
+        const cat = classifyFileFailure(row);
+        if (!cat) {
           return (
             <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-medium bg-emerald-50 text-emerald-700">
               <Check className="h-3 w-3" />
-              匹配
+              通过
             </span>
           );
         }
-        if (!row.sizeMatch) {
-          return (
-            <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-medium bg-rose-50 text-rose-700">
-              <AlertTriangle className="h-3 w-3" />
-              缺失
-            </span>
-          );
-        }
+        const colorMap: Record<FailedCategory, string> = {
+          '校验值不一致': 'bg-amber-50 text-amber-700',
+          '大小不一致': 'bg-violet-50 text-violet-700',
+          '缺失文件': 'bg-rose-50 text-rose-700',
+          '其他异常': 'bg-slate-100 text-slate-700',
+        };
         return (
-          <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-medium bg-amber-50 text-amber-700">
-            <XCircle className="h-3 w-3" />
-            不匹配
+          <span className={cn('inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-medium', colorMap[cat])}>
+            <AlertTriangle className="h-3 w-3" />
+            {cat}
           </span>
         );
       },
@@ -2386,19 +2918,12 @@ function VerificationDetailsTable({ details }: { details: (VerificationDetail & 
     {
       id: 'size',
       header: '大小',
-      accessorKey: 'size' as any,
+      accessorKey: 'sizeBytes',
       sortable: true,
       align: 'right',
       width: '110px',
       cell: (row) => (
-        <div>
-          <span className="font-mono text-slate-600 text-xs">{formatFileSize(row.size)}</span>
-          {!row.sizeMatch && (
-            <div className="text-[10px] text-rose-500 mt-0.5 font-mono">
-              预期 {formatFileSize(row.expectedSize)}
-            </div>
-          )}
-        </div>
+        <span className="font-mono text-slate-600 text-xs">{row.size ?? formatBytes(row.sizeBytes ?? 0)}</span>
       ),
     },
   ];
@@ -2423,30 +2948,50 @@ function VerificationDetailsTable({ details }: { details: (VerificationDetail & 
           </tr>
         </thead>
         <tbody className="divide-y divide-slate-100">
-          {details.map((row, idx) => {
-            const isProblem = row.status !== 'passed';
-            return (
-              <tr
-                key={row.id}
-                className={cn(
-                  'transition-colors',
-                  isProblem ? (row.sizeMatch ? 'bg-amber-50/40' : 'bg-rose-50/40') : (idx % 2 === 1 ? 'bg-slate-50/40' : '')
-                )}
-              >
-                {columns.map((col) => (
-                  <td
-                    key={col.id}
-                    className={cn(
-                      'px-4 py-3.5 text-sm',
-                      col.align === 'center' ? 'text-center' : col.align === 'right' ? 'text-right' : 'text-left'
-                    )}
-                  >
-                    {col.cell ? col.cell(row, idx) : ((row as any)[col.accessorKey!] as React.ReactNode)}
-                  </td>
-                ))}
-              </tr>
-            );
-          })}
+          {details.length === 0 ? (
+            <tr>
+              <td colSpan={columns.length} className="px-4 py-12 text-center">
+                <div className="inline-flex items-center justify-center w-12 h-12 rounded-xl bg-slate-100 mb-3">
+                  <Search className="h-6 w-6 text-slate-400" />
+                </div>
+                <div className="text-sm font-medium text-slate-600">暂无符合条件的记录</div>
+                <div className="text-xs text-slate-400 mt-1">试试调整筛选条件</div>
+              </td>
+            </tr>
+          ) : (
+            details.map((row, idx) => {
+              const category = classifyFileFailure(row);
+              return (
+                <tr
+                  key={row.id ?? idx}
+                  className={cn(
+                    'transition-colors',
+                    category === '缺失文件'
+                      ? 'bg-rose-50/40'
+                      : category === '大小不一致'
+                        ? 'bg-violet-50/40'
+                        : category === '校验值不一致'
+                          ? 'bg-amber-50/40'
+                          : category === '其他异常'
+                            ? 'bg-slate-50/60'
+                            : (idx % 2 === 1 ? 'bg-slate-50/40' : '')
+                  )}
+                >
+                  {columns.map((col) => (
+                    <td
+                      key={col.id}
+                      className={cn(
+                        'px-4 py-3.5 text-sm',
+                        col.align === 'center' ? 'text-center' : col.align === 'right' ? 'text-right' : 'text-left'
+                      )}
+                    >
+                      {col.cell ? col.cell(row, idx) : ((row as any)[col.accessorKey!] as React.ReactNode)}
+                    </td>
+                  ))}
+                </tr>
+              );
+            })
+          )}
         </tbody>
       </table>
     </div>
@@ -2457,6 +3002,9 @@ interface RecoveryTaskDrawerProps {
   open: boolean;
   onClose: () => void;
   onViewVerificationReport: (taskId: string) => void;
+  onViewManualReport?: (vrId: string) => void;
+  showToast?: (message: string, type?: 'info' | 'error') => void;
+  highlightedTaskId?: string | null;
 }
 
 function formatDurationFromNow(isoEnd?: string): string {
@@ -2498,16 +3046,22 @@ function formatSpeed(bytesPerSec?: number): string {
   return `${mb.toFixed(0)} MB/s`;
 }
 
-function RecoveryTaskDrawer({ open, onClose, onViewVerificationReport }: RecoveryTaskDrawerProps) {
+function RecoveryTaskDrawer({ open, onClose, onViewVerificationReport, onViewManualReport, showToast, highlightedTaskId }: RecoveryTaskDrawerProps) {
   const store = useAppStore();
   const recoveryTasks = store.recoveryTasks;
   const verificationResults = store.verificationResults;
   const [copiedId, setCopiedId] = useState<string | null>(null);
   const [, forceTick] = useState(0);
   const [highlightId, setHighlightId] = useState<string | null>(null);
+  const [openManualMenuId, setOpenManualMenuId] = useState<string | null>(null);
+  const [cancelModalTask, setCancelModalTask] = useState<string | null>(null);
+  const [cancelReason, setCancelReason] = useState('');
 
   useEffect(() => {
-    if (!open) return;
+    if (!open) {
+      setOpenManualMenuId(null);
+      return;
+    }
     const id = setInterval(() => forceTick((n) => n + 1), 1000);
     return () => clearInterval(id);
   }, [open]);
@@ -2524,12 +3078,51 @@ function RecoveryTaskDrawer({ open, onClose, onViewVerificationReport }: Recover
 
   const handleViewReport = (task: any) => {
     if (task.status !== 'completed') return;
-    const verificationId = task.relatedVerificationId;
-    const vr = verificationResults.some((v) => v.taskId === task.id);
-    if (!vr) return;
+    const hasAuto = task.relatedVerificationId &&
+      verificationResults.some((v) => v.id === task.relatedVerificationId);
+    const hasAny = verificationResults.some((v) => v.taskId === task.id);
+    if (!hasAuto && !hasAny) {
+      if (showToast) showToast('自动校验报告尚不存在', 'error');
+      return;
+    }
     setHighlightId(task.id);
     setTimeout(() => setHighlightId(null), 1800);
     onViewVerificationReport(task.id);
+  };
+
+  const handleViewManual = (vrId: string) => {
+    setOpenManualMenuId(null);
+    if (onViewManualReport) {
+      onViewManualReport(vrId);
+    }
+  };
+
+  const handlePauseTask = (taskId: string) => {
+    const ok = store.pauseRecoveryTask(taskId);
+    if (ok && showToast) showToast('任务已暂停', 'info');
+  };
+
+  const handleResumeTask = (taskId: string) => {
+    const ok = store.resumeRecoveryTask(taskId);
+    if (ok && showToast) showToast('任务已继续', 'info');
+  };
+
+  const handleOpenCancelModal = (taskId: string) => {
+    setCancelModalTask(taskId);
+    setCancelReason('');
+  };
+
+  const handleConfirmCancel = () => {
+    if (!cancelModalTask) return;
+    const ok = store.cancelRecoveryTask(cancelModalTask, cancelReason);
+    if (ok && showToast) showToast('任务已取消', 'info');
+    setCancelModalTask(null);
+    setCancelReason('');
+  };
+
+  const handleCloseCancelModal = () => {
+    setCancelModalTask(null);
+    setCancelReason('');
   };
 
   const getStatusBadge = (task: any) => {
@@ -2563,6 +3156,22 @@ function RecoveryTaskDrawer({ open, onClose, onViewVerificationReport }: Recover
         <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[10px] font-semibold border bg-rose-50 text-rose-700 border-rose-200">
           <XCircle className="h-3 w-3" />
           失败
+        </span>
+      );
+    }
+    if (status === 'paused') {
+      return (
+        <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[10px] font-semibold border bg-indigo-50 text-indigo-700 border-indigo-200">
+          <Pause className="h-3 w-3" />
+          已暂停
+        </span>
+      );
+    }
+    if (status === 'cancelled') {
+      return (
+        <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[10px] font-semibold border bg-slate-100 text-slate-600 border-slate-200">
+          <XCircle className="h-3 w-3" />
+          已取消
         </span>
       );
     }
@@ -2662,6 +3271,69 @@ function RecoveryTaskDrawer({ open, onClose, onViewVerificationReport }: Recover
         </div>
       );
     }
+    if (status === 'paused') {
+      const pausedProgress = task.progressAtPause ?? progress ?? 0;
+      const pausedProcessed = task.processedAtPause ?? task.processedFiles ?? 0;
+      const totalSizeBytes = task.totalSizeBytes ?? 0;
+      const processedBytes = Math.floor(totalSizeBytes * (pausedProgress / 100));
+      return (
+        <div className="space-y-1.5">
+          <div className="relative h-2 bg-slate-100 rounded-full overflow-hidden">
+            <div
+              className="absolute inset-y-0 left-0 bg-slate-300 transition-all duration-500"
+              style={{ width: `${pausedProgress}%` }}
+            />
+          </div>
+          <div className="flex items-center justify-between text-[11px] text-slate-500">
+            <span className="font-mono text-indigo-700 font-semibold">已暂停 {pausedProgress}%</span>
+            <span className="font-mono">{pausedProcessed} / {task.totalFiles} 个文件</span>
+          </div>
+          <div className="flex items-center justify-between text-[11px] text-slate-500">
+            <span>
+              ⏸ 暂停于 {formatBytes(processedBytes)} · 共 {task.totalSize || formatBytes(totalSizeBytes)}
+            </span>
+          </div>
+          {task.pausedAt && (
+            <div className="text-[11px] text-slate-500 flex items-center gap-1.5">
+              <Clock className="h-3 w-3" />
+              暂停时间：{formatDateTime(task.pausedAt)}
+            </div>
+          )}
+        </div>
+      );
+    }
+    if (status === 'cancelled') {
+      const cancelledProgress = progress ?? 0;
+      return (
+        <div className="space-y-2">
+          <div className="relative h-2 bg-slate-100 rounded-full overflow-hidden">
+            <div
+              className="absolute inset-y-0 left-0 bg-slate-300"
+              style={{ width: `${cancelledProgress}%` }}
+            />
+          </div>
+          <div className="flex items-center justify-between text-[11px] text-slate-500">
+            <span className="font-mono text-slate-600 font-semibold">已取消</span>
+            <span className="font-mono">{task.processedFiles} / {task.totalFiles} 个文件</span>
+          </div>
+          <div className="mt-2 p-2.5 rounded-lg border border-slate-200 bg-slate-50 space-y-1.5">
+            <div className="flex items-center gap-1.5 text-[11px] font-semibold text-slate-700">
+              <XCircle className="h-3.5 w-3.5 text-slate-500" />
+              取消原因
+            </div>
+            <div className="text-[11px] text-slate-600 break-words pl-5">
+              {task.cancelReason || '用户手动取消'}
+            </div>
+            {task.cancelledAt && (
+              <div className="text-[11px] text-slate-500 flex items-center gap-1.5 pl-5">
+                <Clock className="h-3 w-3" />
+                取消时间：{formatDateTime(task.cancelledAt)}
+              </div>
+            )}
+          </div>
+        </div>
+      );
+    }
     return null;
   };
 
@@ -2669,6 +3341,12 @@ function RecoveryTaskDrawer({ open, onClose, onViewVerificationReport }: Recover
     const hasVerification = !!task.relatedVerificationId ||
       verificationResults.some((v) => v.taskId === task.id);
     const isCompleted = task.status === 'completed';
+
+    const manualVrIds = task.manualVerificationIds ?? [];
+    const manualVrs = manualVrIds
+      .map((id: string) => verificationResults.find((v) => v.id === id))
+      .filter(Boolean);
+    const manualCount = manualVrs.length;
 
     if (task.status === 'pending') {
       return (
@@ -2703,22 +3381,181 @@ function RecoveryTaskDrawer({ open, onClose, onViewVerificationReport }: Recover
         </button>
       );
     }
-    const isHighlighted = highlightId === task.id;
+    if (task.status === 'paused') {
+      return (
+        <button
+          disabled
+          className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-xs font-medium bg-slate-50 text-slate-400 border border-slate-200 cursor-not-allowed"
+        >
+          <Pause className="h-3 w-3" />
+          任务已暂停
+        </button>
+      );
+    }
+    if (task.status === 'cancelled') {
+      return (
+        <button
+          disabled
+          className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-xs font-medium bg-slate-50 text-slate-400 border border-slate-200 cursor-not-allowed"
+        >
+          <XCircle className="h-3 w-3" />
+          任务已取消，无校验报告
+        </button>
+      );
+    }
+    const isHighlighted = highlightId === task.id || highlightedTaskId === task.id;
+    const isMenuOpen = openManualMenuId === task.id;
+
     return (
-      <button
-        onClick={() => handleViewReport(task)}
-        className={cn(
-          'inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-xs font-medium transition-all border',
-          isHighlighted
-            ? 'bg-emerald-100 text-emerald-800 border-emerald-400 shadow-md shadow-emerald-200 scale-105'
-            : 'bg-primary-50 text-primary-700 hover:bg-primary-100 border-primary-200'
+      <div className="relative inline-block">
+        <div className="flex flex-col gap-1.5 items-start">
+          <button
+            onClick={() => handleViewReport(task)}
+            className={cn(
+              'inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-xs font-medium transition-all border',
+              isHighlighted
+                ? 'bg-emerald-100 text-emerald-800 border-emerald-400 shadow-md shadow-emerald-200 scale-105'
+                : 'bg-primary-50 text-primary-700 hover:bg-primary-100 border-primary-200'
+            )}
+            style={isHighlighted ? { animation: 'pulse 0.6s ease-in-out 2' } : undefined}
+          >
+            <FileCheck className="h-3 w-3" />
+            查看校验报告
+          </button>
+          {manualCount > 0 && onViewManualReport && (
+            <button
+              onClick={(e) => {
+                e.stopPropagation();
+                setOpenManualMenuId(isMenuOpen ? null : task.id);
+              }}
+              className="inline-flex items-center gap-1 text-[11px] text-slate-500 hover:text-primary-600 transition-colors"
+            >
+              <Hand className="h-2.5 w-2.5" />
+              或查看手动报告（{manualCount} 份）
+              <ChevronDown className={cn('h-2.5 w-2.5 transition-transform', isMenuOpen && 'rotate-180')} />
+            </button>
+          )}
+        </div>
+        {isMenuOpen && manualCount > 0 && (
+          <>
+            <div
+              className="fixed inset-0 z-40"
+              onClick={() => setOpenManualMenuId(null)}
+            />
+            <div className="absolute top-full left-0 mt-2 min-w-[280px] bg-white rounded-xl shadow-xl border border-slate-200 overflow-hidden z-50">
+              <div className="px-3 py-2 bg-slate-50 border-b border-slate-200">
+                <div className="text-[11px] font-semibold text-slate-600 flex items-center gap-1.5">
+                  <Hand className="h-3 w-3 text-amber-600" />
+                  手动校验报告列表
+                </div>
+              </div>
+              <div className="max-h-64 overflow-y-auto">
+                {manualVrs.map((vr: any, idx: number) => {
+                  const rate = getSuccessRate(vr);
+                  return (
+                    <button
+                      key={vr.id}
+                      onClick={() => handleViewManual(vr.id)}
+                      className="w-full text-left px-3 py-2.5 hover:bg-slate-50 border-b border-slate-100 last:border-b-0 transition-colors"
+                    >
+                      <div className="flex items-center justify-between gap-2 mb-1">
+                        <span className="text-xs font-semibold text-slate-800">
+                          手动报告 #{idx + 1}
+                        </span>
+                        <span className={cn(
+                          'text-[10px] font-bold px-1.5 py-0.5 rounded',
+                          rate >= 100
+                            ? 'bg-emerald-100 text-emerald-700'
+                            : rate >= 95
+                              ? 'bg-amber-100 text-amber-700'
+                              : 'bg-rose-100 text-rose-700'
+                        )}>
+                          通过率 {rate}%
+                        </span>
+                      </div>
+                      <div className="text-[10px] text-slate-500 flex items-center gap-1.5">
+                        <Calendar className="h-2.5 w-2.5" />
+                        {formatDateTime(vr.createdAt)}
+                        <span className="mx-1 text-slate-300">·</span>
+                        <FileText className="h-2.5 w-2.5" />
+                        {vr.totalFiles} 个文件
+                      </div>
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+          </>
         )}
-        style={isHighlighted ? { animation: 'pulse 0.6s ease-in-out 2' } : undefined}
-      >
-        <FileCheck className="h-3 w-3" />
-        查看校验报告
-      </button>
+      </div>
     );
+  };
+
+  const getSuccessRate = (vr: VerificationResult): number => {
+    if (typeof vr.successRate === 'number') return vr.successRate;
+    return vr.totalFiles > 0 ? Math.round((vr.passedFiles / vr.totalFiles) * 10000) / 100 : 0;
+  };
+
+  const renderActionButtons = (task: any) => {
+    const { status, id } = task;
+
+    if (status === 'pending') {
+      return (
+        <div className="flex items-center gap-2">
+          <button
+            onClick={() => handleOpenCancelModal(id)}
+            className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-xs font-medium transition-all border border-rose-200 bg-white text-rose-600 hover:bg-rose-50 hover:border-rose-300"
+          >
+            <XCircle className="h-3 w-3" />
+            取消
+          </button>
+        </div>
+      );
+    }
+
+    if (status === 'running') {
+      return (
+        <div className="flex items-center gap-2">
+          <button
+            onClick={() => handlePauseTask(id)}
+            className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-xs font-medium transition-all border border-amber-200 bg-white text-amber-700 hover:bg-amber-50 hover:border-amber-300"
+          >
+            <Pause className="h-3 w-3" />
+            暂停
+          </button>
+          <button
+            onClick={() => handleOpenCancelModal(id)}
+            className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-xs font-medium transition-all border border-rose-200 bg-white text-rose-600 hover:bg-rose-50 hover:border-rose-300"
+          >
+            <XCircle className="h-3 w-3" />
+            取消
+          </button>
+        </div>
+      );
+    }
+
+    if (status === 'paused') {
+      return (
+        <div className="flex items-center gap-2">
+          <button
+            onClick={() => handleResumeTask(id)}
+            className="inline-flex items-center gap-1 px-3 py-1.5 rounded-lg text-xs font-semibold transition-all shadow-sm bg-primary-600 text-white hover:bg-primary-700 ring-1 ring-primary-700/20"
+          >
+            <Play className="h-3 w-3 fill-current" />
+            继续
+          </button>
+          <button
+            onClick={() => handleOpenCancelModal(id)}
+            className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-xs font-medium transition-all border border-rose-200 bg-white text-rose-600 hover:bg-rose-50 hover:border-rose-300"
+          >
+            <XCircle className="h-3 w-3" />
+            取消
+          </button>
+        </div>
+      );
+    }
+
+    return null;
   };
 
   return (
@@ -2777,7 +3614,7 @@ function RecoveryTaskDrawer({ open, onClose, onViewVerificationReport }: Recover
                     key={task.id}
                     className={cn(
                       'bg-white rounded-xl border p-4 space-y-3 transition-all',
-                      highlightId === task.id
+                      highlightId === task.id || highlightedTaskId === task.id
                         ? 'border-emerald-300 ring-2 ring-emerald-100 shadow-md'
                         : 'border-slate-200 hover:border-slate-300'
                     )}
@@ -2841,11 +3678,31 @@ function RecoveryTaskDrawer({ open, onClose, onViewVerificationReport }: Recover
 
                     {renderProgress(task)}
 
-                    <div className="flex items-center justify-between pt-1 border-t border-slate-50">
-                      <span className="text-[11px] text-slate-400">
+                    {task.status === 'completed' && (() => {
+                      const hasAuto = !!task.relatedVerificationId;
+                      const manualCount = (task.manualVerificationIds ?? []).length;
+                      if (!hasAuto && manualCount === 0) return null;
+                      const parts = [];
+                      if (hasAuto) parts.push(`自动 ${1} 份`);
+                      if (manualCount > 0) parts.push(`手动 ${manualCount} 份`);
+                      return (
+                        <div className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg bg-sky-50/60 border border-sky-100">
+                          <FileCheck className="h-3 w-3 text-sky-600" />
+                          <span className="text-[11px] text-sky-700 font-medium">
+                            已生成校验报告：{parts.join(' + ')}
+                          </span>
+                        </div>
+                      );
+                    })()}
+
+                    <div className="flex items-center justify-between pt-1 border-t border-slate-50 gap-3">
+                      <span className="text-[11px] text-slate-400 flex-shrink-0">
                         创建：{formatDateTime(task.createdAt)}
                       </span>
-                      {getReportButton(task)}
+                      <div className="flex items-center gap-2 ml-auto flex-wrap justify-end">
+                        {renderActionButtons(task)}
+                        {getReportButton(task)}
+                      </div>
                     </div>
                   </div>
                 );
@@ -2853,6 +3710,59 @@ function RecoveryTaskDrawer({ open, onClose, onViewVerificationReport }: Recover
           )}
         </div>
       </div>
+
+      {cancelModalTask && (
+        <div className="fixed inset-0 z-[60] flex items-center justify-center">
+          <div
+            className="absolute inset-0 bg-slate-900/50 backdrop-blur-sm"
+            onClick={handleCloseCancelModal}
+          />
+          <div className="relative bg-white rounded-2xl shadow-2xl border border-slate-200 w-[420px] max-w-[90vw] overflow-hidden animate-in fade-in zoom-in-95 duration-200">
+            <div className="px-5 py-4 border-b border-slate-100 flex items-center justify-between">
+              <h3 className="text-sm font-bold text-slate-900 flex items-center gap-2">
+                <XCircle className="h-4 w-4 text-rose-600" />
+                取消恢复任务
+              </h3>
+              <button
+                onClick={handleCloseCancelModal}
+                className="p-1.5 rounded-lg hover:bg-slate-100 text-slate-400 hover:text-slate-600 transition-all"
+              >
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+
+            <div className="p-5 space-y-4">
+              <p className="text-xs text-slate-600">
+                取消后任务将无法继续，已完成的文件将保留在目标路径。请输入取消原因（可选）：
+              </p>
+              <div>
+                <textarea
+                  value={cancelReason}
+                  onChange={(e) => setCancelReason(e.target.value)}
+                  placeholder="例如：目标路径需要调整 / 临时不需要恢复了..."
+                  rows={3}
+                  className="w-full px-3 py-2.5 rounded-lg border border-slate-200 text-xs text-slate-700 placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-rose-200 focus:border-rose-400 resize-none transition-all"
+                />
+              </div>
+            </div>
+
+            <div className="px-5 py-3.5 border-t border-slate-100 bg-slate-50 flex items-center justify-end gap-2">
+              <button
+                onClick={handleCloseCancelModal}
+                className="px-4 py-1.5 rounded-lg text-xs font-medium bg-white text-slate-700 border border-slate-200 hover:bg-slate-50 hover:border-slate-300 transition-all"
+              >
+                返回
+              </button>
+              <button
+                onClick={handleConfirmCancel}
+                className="px-4 py-1.5 rounded-lg text-xs font-semibold bg-rose-600 text-white hover:bg-rose-700 shadow-sm shadow-rose-200 transition-all"
+              >
+                确认取消
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

@@ -28,6 +28,8 @@ import {
 
 export type RecoveryTask = MockRecoveryTask;
 
+const recoveryTickAbortMap = new Map<string, { aborted: boolean }>();
+
 const STORAGE_KEYS = {
   VERIFICATION_RESULTS: 'dmbt_verificationResults_v1',
   RECOVERY_TASKS: 'dmbt_recoveryTasks_v1',
@@ -162,7 +164,11 @@ interface AppStore {
   performRecovery: (data: Omit<RecoveryTask, 'id' | 'status' | 'progress' | 'processedFiles' | 'processedSize' | 'createdAt' | 'createdBy'>) => void;
   performRecoveryAndVerify: (data: Omit<RecoveryTask, 'id' | 'status' | 'progress' | 'processedFiles' | 'processedSize' | 'createdAt' | 'createdBy'>) => string;
   updateRecoveryTask: (taskId: string, patch: Partial<RecoveryTask>) => void;
-  generateVerification: (data: { taskId: string; name: string; totalFiles: number; type?: 'migration' | 'recovery' }) => string;
+  pauseRecoveryTask: (taskId: string) => boolean;
+  resumeRecoveryTask: (taskId: string) => boolean;
+  cancelRecoveryTask: (taskId: string, reason?: string) => boolean;
+  generateVerification: (data: { taskId: string; name: string; totalFiles: number; type?: 'migration' | 'recovery'; source?: 'auto' | 'manual' }) => string;
+  logCsvExport: (vrId: string, opts: { fileName: string; onlyAbnormal: boolean; count: number }) => void;
   getVerificationHistoryByTaskId: (taskId: string) => VerificationResult[];
   clearPersistenceAndReset: () => void;
 
@@ -468,6 +474,8 @@ export const useAppStore = create<AppStore>((set, get) => ({
         level: success ? 'success' : 'error',
         target: taskId,
         targetType: 'migration_task',
+        failedFileId: fileId,
+        migrationTaskId: taskId,
         details: `重试失败文件：${file.fileName}，结果：${resultNote}`,
       });
     }, delay);
@@ -569,6 +577,7 @@ export const useAppStore = create<AppStore>((set, get) => ({
             level: failCount === 0 ? 'success' : (successCount === 0 ? 'error' : 'warning'),
             target: taskId,
             targetType: 'migration_task',
+            migrationTaskId: taskId,
             details: `共${total}个：成功${successCount}个，失败${failCount}个`,
           });
           get().clearFailedFilesSelection(taskId);
@@ -612,6 +621,8 @@ export const useAppStore = create<AppStore>((set, get) => ({
       level: 'warning',
       target: taskId,
       targetType: 'migration_task',
+      failedFileId: fileId,
+      migrationTaskId: taskId,
       details: `跳过失败文件：${file.fileName}`,
     });
   },
@@ -660,6 +671,7 @@ export const useAppStore = create<AppStore>((set, get) => ({
       level: 'warning',
       target: resolvedTaskId,
       targetType: 'migration_task',
+      migrationTaskId: resolvedTaskId,
       details: `共${validIds.length}个文件被跳过`,
     });
     if (taskId) {
@@ -746,13 +758,15 @@ export const useAppStore = create<AppStore>((set, get) => ({
         bs.id === scheduleId ? { ...bs, status: newStatus, enabled: newEnabled } : bs
       )
     }));
+    const sourcesCount = schedule.sourceId ? 1 : 0;
+    const retention = schedule.retentionCount ?? schedule.retentionDays ?? '默认';
     get().addAuditLog({
       action: newEnabled ? '启用备份计划' : '暂停备份计划',
       actionType: 'update',
       level: newEnabled ? 'success' : 'warning',
       target: scheduleId,
       targetType: 'backup_schedule',
-      details: `${newEnabled ? '启用' : '暂停'}备份计划：${schedule.name}`
+      details: `${newEnabled ? '启用' : '暂停'}备份计划：${schedule.name}，关联数据源 ${sourcesCount} 个，保留 ${retention} 版本`
     });
   },
 
@@ -784,13 +798,15 @@ export const useAppStore = create<AppStore>((set, get) => ({
       createdAt: getNow()
     };
     set((s) => ({ backupSchedules: [...s.backupSchedules, newSchedule] }));
+    const sourcesCount = newSchedule.sourceId ? 1 : 0;
+    const retention = newSchedule.retentionCount ?? newSchedule.retentionDays ?? 30;
     get().addAuditLog({
       action: '创建备份计划',
       actionType: 'create',
       level: 'success',
       target: newSchedule.id,
       targetType: 'backup_schedule',
-      details: `创建备份计划：${newSchedule.name}`
+      details: `创建备份计划：${newSchedule.name}，关联数据源 ${sourcesCount} 个，保留 ${retention} 版本`
     });
   },
 
@@ -823,6 +839,7 @@ export const useAppStore = create<AppStore>((set, get) => ({
       level: 'info',
       target: newTask.id,
       targetType: 'recovery_task',
+      recoveryTaskId: newTask.id,
       details: `创建恢复任务：基于备份版本 ${version?.version ?? data.versionId}，目标路径：${data.targetPath}`
     });
   },
@@ -862,17 +879,21 @@ export const useAppStore = create<AppStore>((set, get) => ({
     set((s) => ({ recoveryTasks: [...s.recoveryTasks, newTask] }));
     safeWriteLS(STORAGE_KEYS.RECOVERY_TASKS, get().recoveryTasks);
     get().addAuditLog({
-      action: '创建恢复任务',
+      action: '发起恢复任务',
       actionType: 'create',
       level: 'info',
-      target: newTask.id,
+      target: recoveryTaskId,
       targetType: 'recovery_task',
-      details: `创建恢复任务：基于备份版本 ${version?.version ?? data.versionId}，目标路径：${data.targetPath}`
+      recoveryTaskId: recoveryTaskId,
+      details: `版本 ${version?.version ?? data.versionId}，${data.totalFiles} 个文件，目标路径：${data.targetPath}`
     });
 
     const tick = () => {
+      const abortEntry = recoveryTickAbortMap.get(recoveryTaskId);
+      if (!abortEntry || abortEntry.aborted) return;
+
       const current = get().recoveryTasks.find((t) => t.id === recoveryTaskId);
-      if (!current || current.status === 'completed' || current.status === 'failed') return;
+      if (!current || current.status === 'completed' || current.status === 'failed' || current.status === 'cancelled') return;
 
       if (current.status === 'pending') {
         get().updateRecoveryTask(recoveryTaskId, {
@@ -907,11 +928,12 @@ export const useAppStore = create<AppStore>((set, get) => ({
 
         if (nextProcessed >= current.totalFiles) {
           setTimeout(() => {
-            const verificationId = get().generateVerification({
+            const newVerificationId = get().generateVerification({
               taskId: recoveryTaskId,
               name: `${data.name}-恢复校验`,
               totalFiles: data.totalFiles,
-              type: 'recovery'
+              type: 'recovery',
+              source: 'auto'
             });
             const completedNow = getNow();
             const finalSizeStr = formatBytes(totalSizeBytes);
@@ -921,16 +943,20 @@ export const useAppStore = create<AppStore>((set, get) => ({
               processedFiles: current.totalFiles,
               processedSize: finalSizeStr,
               completedAt: completedNow,
-              relatedVerificationId: verificationId
+              relatedVerificationId: newVerificationId
             });
+            const passed = Math.floor(current.totalFiles * 0.98);
             get().addAuditLog({
               action: '恢复任务完成',
               actionType: 'execute',
               level: 'success',
               target: recoveryTaskId,
               targetType: 'recovery_task',
-              details: `恢复任务完成：${current.name}，共 ${current.totalFiles} 个文件`
+              recoveryTaskId: recoveryTaskId,
+              verificationId: newVerificationId,
+              details: `${passed}/${current.totalFiles} 通过，已自动生成校验报告`
             });
+            recoveryTickAbortMap.delete(recoveryTaskId);
           }, 1500);
         } else {
           const nextDelay = 700 + Math.random() * 500;
@@ -939,21 +965,177 @@ export const useAppStore = create<AppStore>((set, get) => ({
       }
     };
 
+    recoveryTickAbortMap.set(recoveryTaskId, { aborted: false });
     setTimeout(tick, 800);
     return recoveryTaskId;
+  },
+
+  pauseRecoveryTask: (taskId) => {
+    const current = get().recoveryTasks.find((t) => t.id === taskId);
+    if (!current || current.status !== 'running') return false;
+
+    const abortEntry = recoveryTickAbortMap.get(taskId);
+    if (abortEntry) {
+      abortEntry.aborted = true;
+    }
+
+    get().updateRecoveryTask(taskId, {
+      status: 'paused',
+      pausedAt: getNow(),
+      progressAtPause: current.progress,
+      processedAtPause: current.processedFiles
+    });
+
+    get().addAuditLog({
+      action: '暂停恢复任务',
+      actionType: 'update',
+      level: 'warning',
+      target: taskId,
+      targetType: 'recovery_task',
+      details: `暂停恢复任务：${current.name}（进度${current.progress}%）`
+    });
+    safeWriteLS(STORAGE_KEYS.RECOVERY_TASKS, get().recoveryTasks);
+    return true;
+  },
+
+  resumeRecoveryTask: (taskId) => {
+    const current = get().recoveryTasks.find((t) => t.id === taskId);
+    if (!current || current.status !== 'paused') return false;
+
+    const curTotalSize = current.totalSizeBytes ?? 0;
+    const startProcessed = current.processedAtPause ?? current.processedFiles ?? 0;
+
+    get().updateRecoveryTask(taskId, {
+      status: 'running'
+    });
+
+    recoveryTickAbortMap.set(taskId, { aborted: false });
+
+    const resumeTick = () => {
+      const abortEntry = recoveryTickAbortMap.get(taskId);
+      if (!abortEntry || abortEntry.aborted) return;
+
+      const latest = get().recoveryTasks.find((t) => t.id === taskId);
+      if (!latest || latest.status === 'completed' || latest.status === 'failed' || latest.status === 'cancelled') return;
+
+      if (latest.status === 'running') {
+        const increment = 3 + Math.floor(Math.random() * 10);
+        const nextProcessed = Math.min(latest.totalFiles, latest.processedFiles + increment);
+        const nextProgress = Math.min(99, Math.floor((nextProcessed / latest.totalFiles) * 100));
+
+        const speedBytesPerSec = Math.floor((20 + Math.random() * 100) * 1024 * 1024);
+        const remainingBytes = Math.floor(curTotalSize * (100 - nextProgress) / 100);
+        const etaSeconds = Math.max(1, Math.floor(remainingBytes / (speedBytesPerSec || 1)));
+        const estimatedEndAt = new Date(Date.now() + etaSeconds * 1000).toISOString();
+
+        const processedBytes = Math.floor(curTotalSize * nextProgress / 100);
+        const processedSizeStr = formatBytes(processedBytes);
+
+        get().updateRecoveryTask(taskId, {
+          processedFiles: nextProcessed,
+          progress: nextProgress,
+          processedSize: processedSizeStr,
+          speedBytesPerSec,
+          estimatedEndAt
+        });
+
+        if (nextProcessed >= latest.totalFiles) {
+          setTimeout(() => {
+            const verificationId = get().generateVerification({
+              taskId: taskId,
+              name: `${latest.name}-恢复校验`,
+              totalFiles: latest.totalFiles,
+              type: 'recovery',
+              source: 'auto'
+            });
+            const completedNow = getNow();
+            const finalSizeStr = formatBytes(curTotalSize);
+            get().updateRecoveryTask(taskId, {
+              status: 'completed',
+              progress: 100,
+              processedFiles: latest.totalFiles,
+              processedSize: finalSizeStr,
+              completedAt: completedNow,
+              relatedVerificationId: verificationId
+            });
+            get().addAuditLog({
+              action: '恢复任务完成',
+              actionType: 'execute',
+              level: 'success',
+              target: taskId,
+              targetType: 'recovery_task',
+              details: `恢复任务完成：${latest.name}，共 ${latest.totalFiles} 个文件`
+            });
+            recoveryTickAbortMap.delete(taskId);
+          }, 1500);
+        } else {
+          const nextDelay = 700 + Math.random() * 500;
+          setTimeout(resumeTick, nextDelay);
+        }
+      }
+    };
+
+    setTimeout(resumeTick, 700);
+
+    get().addAuditLog({
+      action: '继续恢复任务',
+      actionType: 'update',
+      level: 'info',
+      target: taskId,
+      targetType: 'recovery_task',
+      details: `继续恢复任务：${current.name}，从第 ${startProcessed}/${current.totalFiles} 个文件继续`
+    });
+    safeWriteLS(STORAGE_KEYS.RECOVERY_TASKS, get().recoveryTasks);
+    return true;
+  },
+
+  cancelRecoveryTask: (taskId, reason) => {
+    const current = get().recoveryTasks.find((t) => t.id === taskId);
+    if (!current) return false;
+    if (!['pending', 'running', 'paused'].includes(current.status)) return false;
+
+    if (current.status === 'running') {
+      const abortEntry = recoveryTickAbortMap.get(taskId);
+      if (abortEntry) {
+        abortEntry.aborted = true;
+      }
+    }
+
+    const finalReason = reason?.trim() || '用户手动取消';
+
+    get().updateRecoveryTask(taskId, {
+      status: 'cancelled',
+      cancelledAt: getNow(),
+      cancelReason: finalReason,
+      isCancelled: true
+    });
+
+    get().addAuditLog({
+      action: '取消恢复任务',
+      actionType: 'update',
+      level: 'error',
+      target: taskId,
+      targetType: 'recovery_task',
+      details: `取消恢复任务：${current.name}，原因：${finalReason}`
+    });
+    safeWriteLS(STORAGE_KEYS.RECOVERY_TASKS, get().recoveryTasks);
+    recoveryTickAbortMap.delete(taskId);
+    return true;
   },
 
   generateVerification: (data) => {
     const task = get().migrationTasks.find((t) => t.id === data.taskId) ??
                  get().recoveryTasks.find((t) => t.id === data.taskId);
+    const source = data.source ?? 'manual';
     const passed = Math.floor(data.totalFiles * 0.98);
     const failed = Math.max(0, data.totalFiles - passed);
     const verificationType: 'migration' | 'recovery' = data.type !== undefined ? data.type : 'migration';
     const taskName = task?.name ?? data.name;
     const successRate = data.totalFiles > 0 ? Math.round((passed / data.totalFiles) * 10000) / 100 : 0;
     const now = getNow();
+    const newVerificationId = generateId('vr');
     const newVerification: VerificationResult = {
-      id: generateId('vr'),
+      id: newVerificationId,
       taskId: data.taskId,
       taskName,
       name: data.name,
@@ -967,18 +1149,32 @@ export const useAppStore = create<AppStore>((set, get) => ({
       endTime: now,
       createdAt: now,
       details: [],
-      type: verificationType
+      type: verificationType,
+      source
     };
+    if (source === 'manual') {
+      const rt = get().recoveryTasks.find((r) => r.id === data.taskId);
+      if (rt) {
+        const currentManualIds = rt.manualVerificationIds ?? [];
+        get().updateRecoveryTask(rt.id, {
+          manualVerificationIds: [...currentManualIds, newVerification.id]
+        });
+      }
+    }
     set((s) => ({ verificationResults: [...s.verificationResults, newVerification] }));
     safeWriteLS(STORAGE_KEYS.VERIFICATION_RESULTS, get().verificationResults);
     const typeLabel = verificationType === 'recovery' ? '恢复数据校验' : '数据完整性校验';
+    const rate = successRate;
     get().addAuditLog({
-      action: failed === 0 ? `${typeLabel}通过` : `${typeLabel}发现异常`,
+      action: source === 'auto' ? '自动生成校验报告' : '手动生成校验报告',
       actionType: 'execute',
       level: failed === 0 ? 'success' : 'error',
-      target: newVerification.id,
-      targetType: 'verification',
-      details: `${typeLabel}${failed === 0 ? '全部通过' : `发现${failed}个文件异常`}：${taskName}`
+      target: newVerificationId,
+      targetType: 'verification_result',
+      verificationId: newVerificationId,
+      migrationTaskId: verificationType === 'migration' ? data.taskId : undefined,
+      recoveryTaskId: verificationType === 'recovery' ? data.taskId : undefined,
+      details: `${typeLabel}：${taskName}，${data.totalFiles} 个文件，通过率 ${rate}%`
     });
     if (failed > 0) {
       const operator = get().currentOperator;
@@ -998,7 +1194,21 @@ export const useAppStore = create<AppStore>((set, get) => ({
         unreadCount: s.unreadCount + 1
       }));
     }
-    return newVerification.id;
+    return newVerificationId;
+  },
+
+  logCsvExport: (vrId, opts) => {
+    const vr = get().verificationResults.find((v) => v.id === vrId);
+    if (!vr) return;
+    get().addAuditLog({
+      action: '导出校验报告CSV',
+      actionType: 'download',
+      level: 'info',
+      target: vr.id,
+      targetType: 'verification_result',
+      verificationId: vr.id,
+      details: `导出 ${opts.fileName}（仅异常：${opts.onlyAbnormal ? '是' : '否'}，共 ${opts.count} 条明细）`
+    });
   },
 
   markAsRead: (id) => {
